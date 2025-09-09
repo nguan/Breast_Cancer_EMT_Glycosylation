@@ -1,0 +1,297 @@
+```{r}
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install("DESeq2")
+BiocManager::install("tximport")
+install.packages("readr")
+install.packages("readxl")
+BiocManager::install("ensembldb")
+BiocManager::install("AnnotationDbi")
+BiocManager::install("RMariaDB")
+BiocManager::install("org.Mm.eg.db")
+BiocManager::install("org.Hs.eg.db")
+BiocManager::install("Orthology.eg.db")
+BiocManager::install("EnhancedVolcano")
+BiocManager::install("vsn")
+BiocManager::install("apeglm")
+install.packages("pheatmap")
+install.packages("tidyverse")
+install.packages("msigdbr")
+BiocManager::install("txdbmaker")
+install.packages("GenomicFeatures")
+install.packages("ggplot2")
+```
+
+
+---
+title: "BT549_TGFb RNA-seq"
+output: html_notebook
+---
+
+```{r}
+#rm(list=ls())
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(DESeq2)
+library(tximport)
+library(readr)
+library(readxl)
+library(ensembldb)
+library(RMariaDB)
+library(org.Mm.eg.db)
+library(org.Hs.eg.db)
+library(Orthology.eg.db)
+library("vsn")
+library(EnhancedVolcano)
+library(msigdbr)
+library(apeglm)
+library(pheatmap)
+library(txdbmaker)
+library(GenomicFeatures)
+library(ggplot2)
+```
+  The RNA-seq data contains 2 conditions: BT549-Ctrl, BT549-TGFb (10ng/mL for 24hr). With 3 repliates each.
+  First, RNA-seq reads were quantified using Salmon/1.8.0. 
+  Transcriptome version: GRCh38, Ensembl 111
+
+1. We will import count files using tximport.
+```{r}
+# Load metadata and tx2gene file
+dir <- "/Users/xiaohanning/Partners HealthCare Dropbox/Ning Xiaohan/BT549_4T1_TGFb_bulk_rnaseq"
+meta_BT549 <- read.table(file.path(dir,"Analysis/BT549_TGFb_metadata.csv"), sep=",",header=T)
+meta_BT549$Condition <- factor(meta_BT549$Condition)
+meta_BT549$Genotype <- factor(meta_BT549$Genotype)
+txdb_Homo <- makeTxDbFromEnsembl(organism="Homo sapiens", release=111)
+k_Homo <- keys(txdb_Homo, keytype="TXNAME")
+tx2gene_Homo <- select(txdb_Homo, k_Homo, "GENEID", "TXNAME")
+# Load Salmon output using tximport
+files_BT549 <- file.path(dir,paste("Salmon/results/salmon_Homo/",meta_BT549$Sample,"_salmon", sep=""),"quant.sf")
+names(files_BT549)<-meta_BT549$Sample
+txi_data_BT549 <- tximport(files_BT549, type="salmon",tx2gene=tx2gene_Homo, ignoreTxVersion = T)
+write.table(txi_data_BT549$counts, file = file.path(dir, "Analysis/gene_counts_BT549.txt"), sep = "\t", quote = FALSE)
+```
+
+
+2. Make DEseq dataset
+```{r}
+names(txi_data_BT549)
+head(txi_data_BT549$counts)
+dds_BT549 <- DESeqDataSetFromTximport(txi_data_BT549, colData = meta_BT549, design = ~Condition)
+colnames(dds_BT549) <- meta_BT549$Sample
+dds_BT549
+```
+
+```{r}
+# Data QC, remove genes with low counts
+keep_BT549 <- rowSums(counts(dds_BT549)) >= 10
+dds_BT549 <- dds_BT549[keep_BT549,]
+```
+
+```{r}
+# Run DESeq
+dds_BT549 <- DESeq(dds_BT549) 
+resultsNames(dds_BT549) 
+```
+
+```{r}
+dds_BT549 <- readRDS(file.path(dir, "Analysis/BT549_TGFb_deseq2.rds"))
+res_BT549 <- results(dds_BT549, contrast=c("Condition","TGFb","Ctrl")) #TGFb vs Ctrl
+#saveRDS(dds_BT549, file.path(dir, "Analysis/BT549_TGFb_deseq2.rds"))
+```
+
+```{r}
+# LFCshrink
+resLFC_BT549 <- lfcShrink(dds_BT549, coef="Condition_TGFb_vs_Ctrl", type="apeglm")
+resLFC_BT549
+plotMA(res_BT549, ylim=c(-3,3))
+plotMA(resLFC_BT549, ylim=c(-3,3))
+```
+```{r}
+# Data visualization using PCA
+vsds_BT549 <- vst(dds_BT549, blind=F)
+plotPCA(vsds_BT549, intgroup=c("Condition"))
+meanSdPlot(assay(vsds_BT549))
+```
+
+```{r}
+summary(res_BT549)
+res_BT549.df <- as.data.frame(res_BT549)
+head(res_BT549.df)
+```
+```{r}
+# RNA
+genenames_human <- select(org.Hs.eg.db, keys= keys(org.Hs.eg.db, keytype="ENSEMBL"), columns=c("SYMBOL", "ENSEMBL"), keytype="ENSEMBL")
+resfile_BT549 <- res_BT549
+filename_BT549 <- "BT549_TGFb_vs_Ctrl.deseq2_output.tsv"
+plotname_BT549 <- "BT549-TGFb vs BT549-Ctrl"
+
+  resp_table_BT549 <- merge(as.data.frame(resfile_BT549), genenames_human, by.x=0, by.y="ENSEMBL")
+  resp_table_BT549 <- resp_table_BT549[!duplicated(resp_table_BT549$SYMBOL),]
+  resp_table_BT549 <- resp_table_BT549 %>% remove_rownames() %>% column_to_rownames(var = "SYMBOL")
+  resp_table_BT549 <- resp_table_BT549[order(resp_table_BT549$padj), ]
+  Volcano_BT549 <- EnhancedVolcano(resp_table_BT549, lab=rownames(resp_table_BT549), x="log2FoldChange", y="padj", title= plotname_BT549, xlim = c(-8,8), ylim=c(0,120), pointSize = 1, pCutoff=10e-5, FCcutoff=1, labSize=4) # One or more p-values is 0. Converting to 10^-1 * current lowest non-zero p-value
+  print(Volcano_BT549)
+  
+  write.table(resp_table_BT549, file=file.path(dir,"DEseq2",filename_BT549), sep='\t', row.names=T)
+  resSig_BT549 <- subset(resp_table_BT549, padj < 0.05 & abs(log2FoldChange) > 0.5)
+  resSig_BT549 <- resSig_BT549[order(-resSig_BT549$log2FoldChange),] # Descending
+  print(str(sum(resSig_BT549$log2FoldChange > 0)), str(sum(resSig_BT549$log2FoldChange < 0)))
+  write.table(resSig_BT549, file=paste(dir, "/DEseq2/",plotname_BT549,".deseq2_significant.tsv",sep=""), sep='\t', row.names=T)
+```
+
+3. Prepare dataset for GSEA   
+```{r}
+norm_counts_BT549 <- as.data.frame(counts(dds_BT549, normalized=T))
+norm_counts_BT549 <- cbind(DESCRIPTION = "na", norm_counts_BT549)
+write.table(norm_counts_BT549, file=file.path(dir, "GSEA/norm_counts_BT549.txt"), sep="\t")
+# norm_counts_BT549 <- read.table("/Users/xiaohanning/Partners HealthCare Dropbox/Ning Xiaohan/BT549_4T1_TGFb_bulk_rnaseq/GSEA/norm_counts_BT549.txt")
+genenames_human <- select(org.Hs.eg.db, keys= keys(org.Hs.eg.db, keytype="ENSEMBL"), columns=c("SYMBOL", "ENSEMBL"), keytype="ENSEMBL")
+norm_genes_BT549 <- merge(as.data.frame(norm_counts_BT549), genenames_human, by.x=0, by.y="ENSEMBL")
+norm_genes_BT549 <- norm_genes_BT549[!duplicated(norm_genes_BT549$SYMBOL),]
+norm_genes_BT549 <- norm_genes_BT549 %>% remove_rownames() %>% column_to_rownames(var = "SYMBOL")
+norm_genes_BT549 <- norm_genes_BT549[, -1] # remove Ensembl column
+write.table(norm_genes_BT549, file=file.path(dir, "GSEA/norm_genes_BT549.txt"), sep="\t")
+```
+
+4. Retrieve glycosylation-related genes
+```{r}
+# Install if not already installed
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("clusterProfiler")
+BiocManager::install("org.Hs.eg.db")  # For human gene annotation
+BiocManager::install("KEGGREST")      # For accessing KEGG pathway information
+install.packages("biomaRt")
+
+# Load the required packages
+library(clusterProfiler)
+library(org.Hs.eg.db)  # Replace with appropriate organism database if needed
+library(KEGGREST)
+library(biomaRt)
+
+
+# Connect to Ensembl BioMart
+ensembl <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+# Retrieve all GO terms with descriptions
+go_terms <- getBM(attributes = c("go_id", "name_1006"), mart = ensembl)
+
+# Filter GO terms related to glycosylation
+glycosylation_terms <- go_terms[grep("glycosylation", go_terms$name_1006, ignore.case = TRUE), ]
+print(glycosylation_terms)
+
+# Define glycosylation-related GO terms
+go_glycosylation_terms <- c("GO:0070085",  # glycosylation
+                            "GO:0006486",  # protein glycosylation
+                            "GO:0006487",  # protein N-linked glycosylation
+                            "GO:0016757",  # Glycosyltransferase activity
+                            "GO:0008373")  # Sialyltransferase activity
+                            
+                            
+# Retrieve genes associated with these GO terms
+go_gene_list <- bitr(go_glycosylation_terms, fromType="GO", toType="SYMBOL", OrgDb="org.Hs.eg.db")
+go_genes <- unique(go_gene_list$SYMBOL)
+
+# Define the KEGG pathway ID for N-Glycan biosynthesis
+kegg_pathway <- "hsa00510"
+
+# Retrieve pathway information using KEGGREST
+pathway_info <- keggGet(kegg_pathway)
+
+# Extract gene information from the pathway
+genes_info <- pathway_info[[1]]$GENE
+
+# Extract the gene symbols from the gene information
+# The GENE information is usually in pairs, with the gene ID and gene symbol
+kegg_genes <- genes_info[seq(2, length(genes_info), by = 2)]
+# Remove full name; only keep short gene symbols in front of ";".
+kegg_genes <- sub(";.*", "", genes_info[seq(2, length(genes_info), by = 2)])
+
+# View the first few gene symbols
+head(kegg_genes)
+
+
+# Combine the gene lists
+Human_Glycan_genes <- unique(c(go_genes, kegg_genes))
+
+# Display the combined list of genes
+head(Human_Glycan_genes)
+
+#write.table(Human_Glycan_genes, file = paste0(dir, "/Glycosylation/Human_Glycan_genes.csv"), row.names = FALSE, col.names = FALSE)
+
+```
+
+5. Virtualize glycosylation-related genes
+```{r}
+Human_Glycan_genes <- read.table(file.path(dir,"Glycosylation/Human_Glycan_genes.csv"), sep=",",header=T)
+
+# Step 1: Convert csv into character
+Human_Glycan_genes <- as.character(Human_Glycan_genes)
+
+# Step 2: Clean up the string by removing unwanted characters
+Human_Glycan_genes <- gsub("c\\(|\\)", "", Human_Glycan_genes)
+
+# Step 3: Split the string into a vector
+Human_Glycan_genes <- unlist(strsplit(Human_Glycan_genes, split = ",\\s*"))
+
+# Step 4: Remove any remaining quotes
+Human_Glycan_genes <- gsub("\"", "", Human_Glycan_genes)
+
+# Now `gene_vector` is a clean character vector of gene names
+print(Human_Glycan_genes)
+
+# Label glyco-related genes in Volcano plot
+Volcano_BT549_glyco <- EnhancedVolcano(resp_table_BT549, lab=rownames(resp_table_BT549), x="log2FoldChange", y="padj", selectLab = Human_Glycan_genes, drawConnectors = T,max.overlaps = 50,title= plotname_BT549, xlim = c(-8,8), ylim=c(0,120), pointSize = 1, pCutoff=10e-5, FCcutoff=0.25, labSize=4)  # One or more p-values is 0. Converting to 10^-1 * current lowest non-zero p-value
+  print(Volcano_BT549_glyco)
+  
+
+# Retrieve glyco-related DGE (padj < 0.05)
+BT549_Glycan_genes <- subset(resp_table_BT549, rownames(resp_table_BT549) %in% Human_Glycan_genes & padj < 0.05)
+BT549_Glycan_genes <- BT549_Glycan_genes[order(BT549_Glycan_genes$log2FoldChange,decreasing = T),]
+write.table(BT549_Glycan_genes, file=paste(dir, "/Glycosylation/BT549_sig_Glycan_genes.tsv",sep=""), sep='\t', row.names=T)
+
+# Extract the log2 fold changes
+lfc_BT549_Glycan_genes <- as.matrix(BT549_Glycan_genes$log2FoldChange)
+
+# Ensure row names (gene names) are preserved
+rownames(lfc_BT549_Glycan_genes) <- rownames(BT549_Glycan_genes)
+
+# Plot the heatmap
+pheatmap(lfc_BT549_Glycan_genes,
+         cluster_rows = F,
+         cluster_cols = FALSE,  # Set to TRUE if you have multiple conditions (columns)
+         show_rownames = TRUE,
+         show_colnames = FALSE,  # Set to TRUE if you have multiple conditions (columns)
+         color = colorRampPalette(c("blue", "white", "red"))(50),
+         main = "Glycosylation-related gene: BT549_TGFβ vs BT549_Ctrl")
+
+```
+
+
+```{r}
+# Read DESeq2 CSV
+resp_table_BT549 <- read.table("/Users/xiaohanning/Partners HealthCare Dropbox/Ning Xiaohan/BT549_4T1_TGFb_bulk_rnaseq/DEseq2/BT549_TGFb_vs_Ctrl.deseq2_output.tsv",sep="\t")
+Human_Glycan_genes <- read.table("/Users/xiaohanning/Partners HealthCare Dropbox/Ning Xiaohan/BT549_4T1_TGFb_bulk_rnaseq/Glycosylation/Human_Glycan_genes.csv",header=F)
+Human_Glycan_genes <- as.vector(Human_Glycan_genes$V1)
+plotname_BT549 <- "BT549-TGFb vs BT549-Ctrl"
+
+# Label glyco-related genes in Volcano plot
+sig_BT549_genes <- rownames(BT549_Glycan_genes)
+top10 <- sig_BT549_genes[c(1:10)]
+bottom10 <- sig_BT549_genes[(length(sig_BT549_genes)-9):length(sig_BT549_genes)]
+colored <- which(rownames(resp_table_BT549) %in% c(top10,bottom10))
+notcolored <- setdiff(1:nrow(resp_table_BT549),colored)
+resp_ordered <- resp_table_BT549[c(notcolored,colored),]
+
+keyvals.colour <- ifelse(rownames(resp_ordered) %in% top10, 'red',ifelse(rownames(resp_ordered) %in% bottom10,"blue",'grey'))
+keyvals.colour[is.na(keyvals.colour)] <- "grey"
+names(keyvals.colour)[keyvals.colour == "red"] <- 'Up'
+names(keyvals.colour)[keyvals.colour == "blue"] <- 'Down'
+names(keyvals.colour)[keyvals.colour == "grey"] <- 'All'
+Volcano_BT549_glyco <- EnhancedVolcano(resp_ordered, lab=rownames(resp_ordered), x="log2FoldChange", y="padj",colCustom = keyvals.colour, selectLab = c(top10, bottom10), drawConnectors = T,max.overlaps = 50,title= plotname_BT549, xlim = c(-8,8), ylim=c(0,150), pointSize = 2, pCutoff=10e-5, FCcutoff=0.25, colConnectors = "grey50",labSize=4)  # One or more p-values is 0. Converting to 10^-1 * current lowest non-zero p-value
+  print(Volcano_BT549_glyco)
+# Sort points
+  
+```

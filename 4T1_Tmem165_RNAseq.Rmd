@@ -1,0 +1,140 @@
+```{r}
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install("DESeq2")
+BiocManager::install("tximport")
+install.packages("readr")
+install.packages("readxl")
+BiocManager::install("ensembldb")
+BiocManager::install("AnnotationDbi")
+BiocManager::install("RMariaDB")
+BiocManager::install("org.Mm.eg.db")
+BiocManager::install("org.Hs.eg.db")
+BiocManager::install("Orthology.eg.db")
+BiocManager::install("EnhancedVolcano")
+BiocManager::install("vsn")
+BiocManager::install("apeglm")
+install.packages("pheatmap")
+```
+
+
+---
+title: "4T1-Tmem165 petri dish RNA-seq"
+output: html_notebook
+---
+
+```{r}
+rm(list=ls())
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(DESeq2)
+library(tximport)
+library(readr)
+library(readxl)
+library(ensembldb)
+library(RMariaDB)
+library(org.Mm.eg.db)
+library(org.Hs.eg.db)
+library(Orthology.eg.db)
+library("vsn")
+library(EnhancedVolcano)
+library(msigdbr)
+library(apeglm)
+library(pheatmap)
+```
+  The RNA-seq data contains 2 conditions: 4T1-Int2 (Ctrl-KO) and 4T1-Tmem165-KO. With 3 repliates each.
+  First, RNA-seq reads were quantified using Salmon/1.8.0. 
+  Transcriptome version: GRCm39, Esembl 108
+1. We will import count files using tximport, and perform alignment QC using STAR + Qualimap.
+```{r}
+# Load metadata and tx2gene file
+dir <- "~/Dropbox (Partners HealthCare)/4T1_Tmem165_petri_bulk_RNAseq"
+meta <- read.table(file.path(dir,"analysis/Tmem165_metadata_249.csv"), sep=",",header=T)
+meta$Condition <- factor(meta$Condition)
+meta$Genotype <- factor(meta$Genotype)
+txdb <- makeTxDbFromEnsembl(organism="Mus musculus", release=108)
+k <- keys(txdb, keytype="TXNAME")
+tx2gene <- select(txdb, k, "GENEID", "TXNAME")
+# Load Salmon output using tximport
+files_Tmem165 <- file.path(dir,paste("salmon/",meta$Sample,"_salmon", sep=""),"quant.sf")
+names(files_Tmem165)<-meta$Sample
+txi_data <- tximport(files_Tmem165, type="salmon",tx2gene=tx2gene, ignoreTxVersion = T)
+write.table(txi_data$counts, file = file.path(dir, "Analysis/gene_counts_Tmem165.txt"), sep = "\t", quote = FALSE)
+```
+2. Make DEseq dataset
+```{r}
+names(txi_data)
+head(txi_data$counts)
+dds <- DESeqDataSetFromTximport(txi_data, colData = meta, design = ~Condition)
+colnames(dds) <- meta$Sample
+dds
+```
+
+```{r}
+# Data QC, remove genes with low counts
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+```
+
+```{r}
+# Run DESeq
+dds <- DESeq(dds)
+res <- results(dds)
+resultsNames(dds)
+```
+
+```{r}
+#dds <- readRDS(file.path(dir, "analysis/4T1_Tmem165_deseq2.rds"))
+res <- results(dds, contrast=c("Condition","4T1_Tmem165","4T1_Int2"))
+saveRDS(dds, file.path(dir, "analysis/4T1_Tmem165_deseq2.rds"))
+```
+
+```{r}
+# LFCshrink
+resLFC <- lfcShrink(dds, coef="Condition_4T1_Tmem165_vs_4T1_Int2", type="apeglm")
+resLFC
+plotMA(res, ylim=c(-3,3))
+plotMA(resLFC, ylim=c(-3,3))
+```
+```{r}
+# Data visualization using PCA
+vsd <- vst(dds, blind=F)
+plotPCA(vsd, intgroup=c("Condition"))
+meanSdPlot(assay(vsd))
+```
+
+```{r}
+summary(res)
+res.df <- as.data.frame(res)
+head(res.df)
+```
+```{r}
+# RNA
+genenames <- select(org.Mm.eg.db, keys= keys(org.Mm.eg.db, keytype="ENSEMBL"), columns=c("SYMBOL", "ENSEMBL"), keytype="ENSEMBL")
+resfile <- res
+filename <- "Tmem165_vs_Int2.deseq2_output.tsv"
+plotname <- "Tmem165_vs_Int2"
+
+  resp_table <- merge(as.data.frame(resfile), genenames, by.x=0, by.y="ENSEMBL")
+  resp_table <- resp_table[!duplicated(resp_table$SYMBOL),]
+  resp_table <- resp_table %>% remove_rownames() %>% column_to_rownames(var = "SYMBOL")
+  resp_table <- resp_table[order(resp_table$padj), ]
+  Volcano <- EnhancedVolcano(resp_table, lab=rownames(resp_table), x="log2FoldChange", y="padj", title= plotname, xlim = c(-8,8), ylim=c(0,120), pointSize = 1, pCutoff=10e-5, FCcutoff=1, labSize=4) # One or more p-values is 0. Converting to 10^-1 * current lowest non-zero p-value
+  print(Volcano)
+
+write.table(resp_table, file=file.path(dir,"DEseq2",filename), sep='\t', row.names=T)
+  resSig <- subset(resp_table, padj < 0.05 & abs(log2FoldChange) > 0.5)
+  resSig <- resSig[order(-resSig$log2FoldChange),] # Descending
+  print(str(sum(resSig$log2FoldChange > 0)), str(sum(resSig$log2FoldChange < 0)))
+  write.table(resSig, file=paste(dir, "/DEseq2/",plotname,".deseq2_significant.tsv",sep=""), sep='\t', row.names=T)
+```
+
+3. Prepare dataset for GSEA
+```{r}
+norm_counts <- as.data.frame(counts(dds, normalized=T))
+norm_counts <- cbind(DESCRIPTION = "na", norm_counts)
+write.table(norm_counts, file=file.path(dir, "analysis/norm_counts.txt"), sep="\t")
+```
+
+

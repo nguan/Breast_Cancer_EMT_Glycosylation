@@ -1,0 +1,443 @@
+```{r}
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install("DESeq2")
+BiocManager::install("tximport")
+install.packages("readr")
+install.packages("readxl")
+BiocManager::install("ensembldb")
+BiocManager::install("AnnotationDbi")
+BiocManager::install("RMariaDB")
+BiocManager::install("org.Mm.eg.db")
+BiocManager::install("org.Hs.eg.db")
+BiocManager::install("Orthology.eg.db")
+BiocManager::install("EnhancedVolcano")
+BiocManager::install("vsn")
+BiocManager::install("apeglm")
+install.packages("pheatmap")
+install.packages("tidyverse")
+install.packages("msigdbr")
+BiocManager::install("txdbmaker")
+install.packages("GenomicFeatures")
+BiocManager::install("biomaRt")
+```
+
+
+---
+title: "4T1_TGFb RNA-seq"
+output: html_notebook
+---
+
+```{r}
+#rm(list=ls())
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(DESeq2)
+library(tximport)
+library(readr)
+library(readxl)
+library(ensembldb)
+library(RMariaDB)
+library(org.Mm.eg.db)
+library(org.Hs.eg.db)
+library(Orthology.eg.db)
+library("vsn")
+library(EnhancedVolcano)
+library(msigdbr)
+library(apeglm)
+library(pheatmap)
+library(txdbmaker)
+library(GenomicFeatures)
+library(biomaRt)
+```
+  The RNA-seq data contains 2 conditions: 4T1-Ctrl, 4T1-TGFb (10ng/mL for 24hr). With 3 repliates each.
+  First, RNA-seq reads were quantified using Salmon/1.8.0. 
+  Transcriptome version: GRCm39, Ensembl 111
+
+1. We will import count files using tximport.
+```{r}
+# Load metadata and tx2gene file
+dir <- "/Users/xiaohanning/Partners HealthCare Dropbox/Ning Xiaohan/BT549_4T1_TGFb_bulk_rnaseq"
+meta_4T1 <- read.table(file.path(dir,"Analysis/4T1_TGFb_metadata.csv"), sep=",",header=T)
+meta_4T1$Condition <- factor(meta_4T1$Condition)
+meta_4T1$Genotype <- factor(meta_4T1$Genotype)
+txdb_Mus <- makeTxDbFromEnsembl(organism="Mus musculus", release=111)
+k_Mus <- keys(txdb_Mus, keytype="TXNAME")
+tx2gene_Mus <- select(txdb_Mus, k_Mus, "GENEID", "TXNAME")
+# Load Salmon output using tximport
+files_4T1 <- file.path(dir,paste("Salmon/results/salmon_Mus/",meta_4T1$Sample,"_salmon", sep=""),"quant.sf")
+names(files_4T1)<-meta_4T1$Sample
+txi_data_4T1 <- tximport(files_4T1, type="salmon",tx2gene=tx2gene_Mus, ignoreTxVersion = T)
+write.table(txi_data_4T1$counts, file = file.path(dir, "Analysis/gene_counts_4T1.txt"), sep = "\t", quote = FALSE)
+```
+
+2. Make DEseq dataset
+```{r}
+names(txi_data_4T1)
+head(txi_data_4T1$counts)
+dds_4T1 <- DESeqDataSetFromTximport(txi_data_4T1, colData = meta_4T1, design = ~Condition)
+colnames(dds_4T1) <- meta_4T1$Sample
+dds_4T1
+```
+
+```{r}
+# Data QC, remove genes with low counts
+keep_4T1 <- rowSums(counts(dds_4T1)) >= 10
+dds_4T1 <- dds_4T1[keep_4T1,]
+```
+
+```{r}
+# Run DESeq
+dds_4T1 <- DESeq(dds_4T1) 
+resultsNames(dds_4T1) #what does this do?
+```
+
+```{r}
+dds_4T1 <- readRDS(file.path(dir, "Analysis/4T1_TGFb_deseq2.rds"))
+res_4T1 <- results(dds_4T1, contrast=c("Condition","TGFb","Ctrl")) #TGFb vs Ctrl
+saveRDS(dds_4T1, file.path(dir, "Analysis/4T1_TGFb_deseq2.rds"))
+```
+
+```{r}
+# LFCshrink
+resLFC_4T1 <- lfcShrink(dds_4T1, coef="Condition_TGFb_vs_Ctrl", type="apeglm")
+resLFC_4T1
+plotMA(res_4T1, ylim=c(-3,3)) # export 5, 5
+plotMA(resLFC_4T1, ylim=c(-3,3))  # export 5, 5
+```
+```{r}
+# Data visualization using PCA
+vsds_4T1 <- vst(dds_4T1, blind=F)
+plotPCA(vsds_4T1, intgroup=c("Condition"))  # export default
+meanSdPlot(assay(vsds_4T1))  # export 4.5, 6
+```
+
+```{r}
+summary(res_4T1)
+res_4T1.df <- as.data.frame(res_4T1)
+head(res_4T1.df)
+```
+```{r}
+# RNA
+genenames_mouse <- select(org.Mm.eg.db, keys= keys(org.Mm.eg.db, keytype="ENSEMBL"), columns=c("SYMBOL", "ENSEMBL"), keytype="ENSEMBL")
+resfile_4T1 <- res_4T1
+filename_4T1 <- "4T1_TGFb_vs_Ctrl.deseq2_output.tsv"
+plotname_4T1 <- "4T1-TGFb vs 4T1-Ctrl"
+
+  resp_table_4T1 <- merge(as.data.frame(resfile_4T1), genenames_mouse, by.x=0, by.y="ENSEMBL")
+  resp_table_4T1 <- resp_table_4T1[!duplicated(resp_table_4T1$SYMBOL),]
+  resp_table_4T1 <- resp_table_4T1 %>% remove_rownames() %>% column_to_rownames(var = "SYMBOL")
+  resp_table_4T1 <- resp_table_4T1[order(resp_table_4T1$padj), ]
+  Volcano_4T1 <- EnhancedVolcano(resp_table_4T1, lab=rownames(resp_table_4T1), x="log2FoldChange", y="padj", title= plotname_4T1, xlim = c(-8,8), ylim=c(0,120), pointSize = 1, pCutoff=10e-5, FCcutoff=1, labSize=4) # One or more p-values is 0. Converting to 10^-1 * current lowest non-zero p-value
+  print(Volcano_4T1)
+  
+  write.table(resp_table_4T1, file=file.path(dir,"DEseq2",filename_4T1), sep='\t', row.names=T)
+  resSig_4T1 <- subset(resp_table_4T1, padj < 0.05 & abs(log2FoldChange) > 0.5)
+  resSig_4T1 <- resSig_4T1[order(-resSig_4T1$log2FoldChange),] # Descending
+  print(str(sum(resSig_4T1$log2FoldChange > 0)), str(sum(resSig_4T1$log2FoldChange < 0)))
+  write.table(resSig_4T1, file=paste(dir, "/DEseq2/",plotname_4T1,".deseq2_significant.tsv",sep=""), sep='\t', row.names=T)
+```
+   
+3. Prepare dataset for GSEA   
+```{r}
+norm_counts_4T1 <- as.data.frame(counts(dds_4T1, normalized=T))
+norm_counts_4T1 <- cbind(DESCRIPTION = "na", norm_counts_4T1)
+write.table(norm_counts_4T1, file=file.path(dir, "GSEA/norm_counts_4T1.txt"), sep="\t")
+# norm_counts_4T1 <- read.table("/Users/xiaohanning/Partners HealthCare Dropbox/Ning Xiaohan/BT549_4T1_TGFb_bulk_rnaseq/GSEA/norm_counts_4T1.txt")
+genenames_mouse <- select(org.Mm.eg.db, keys= keys(org.Mm.eg.db, keytype="ENSEMBL"), columns=c("SYMBOL", "ENSEMBL"), keytype="ENSEMBL")
+norm_genes_4T1 <- merge(as.data.frame(norm_counts_4T1), genenames_mouse, by.x=0, by.y="ENSEMBL")
+norm_genes_4T1 <- norm_genes_4T1[!duplicated(norm_genes_4T1$SYMBOL),]
+norm_genes_4T1 <- norm_genes_4T1 %>% remove_rownames() %>% column_to_rownames(var = "SYMBOL")
+norm_genes_4T1 <- norm_genes_4T1[, -1] # remove Ensembl column
+write.table(norm_genes_4T1, file=file.path(dir, "GSEA/norm_genes_4T1.txt"), sep="\t")
+```
+```{r}
+matchMMUsymbol<-function(mouse_symbol){
+	map=read.table(file.path(dir,'GSEA/Mouse_Human_GeneIDs_sub.txt'),sep=' ',header=T)
+	map_sor<-map[match(mouse_symbol,map$mmu_symbol),]
+	human<-map_sor$hsa_symbol
+	return(human)
+}
+human_genes <- matchMMUsymbol(rownames(norm_genes_4T1))
+norm_genes_4T1$human_genes <- matchMMUsymbol(rownames(norm_genes_4T1))
+norm_genes_4T1 <- norm_genes_4T1[!duplicated(norm_genes_4T1$human_genes),]
+norm_genes_4T1 <- norm_genes_4T1[!is.na(norm_genes_4T1$human_genes)&!(norm_genes_4T1$human_genes==""),]
+norm_hgenes_4T1 <- norm_genes_4T1 %>% remove_rownames() %>% column_to_rownames(var = "human_genes")
+write.table(norm_hgenes_4T1, file=file.path(dir, "GSEA/norm_human_genes_4T1.txt"), sep="\t")
+```
+
+
+```{r}
+# Don't run -- likely convert mouse Ensembl ID to human
+library(biomaRt)
+mouse_to_human_id <- function(mouse_ids){
+mart <- useEnsembl(biomart="ensembl",mirror="useast")
+human <- useEnsembl('ensembl', dataset = 'hsapiens_gene_ensembl',mirror="www")
+mouse <- useEnsembl('ensembl', dataset = 'mmusculus_gene_ensembl',mirror="www")
+
+human_ids <- getLDS(
+  mart = mouse,
+  attributes = c('mgi_symbol','ensembl_gene_id','gene_biotype'),
+  martL = human,
+  attributesL = c('hgnc_symbol','ensembl_gene_id','gene_biotype'),
+  filters = 'ensembl_gene_id',
+  values = mouse_ids)
+return(human_ids)
+}
+human_ids <- mouse_to_human_id(rownames(norm_counts_4T1))
+
+```
+
+4. Retrieve glycosylation-related genes
+```{r}
+# Install if not already installed
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("clusterProfiler")
+BiocManager::install("org.Hs.eg.db")  # For human gene annotation
+BiocManager::install("KEGGREST")      # For accessing KEGG pathway information
+install.packages("biomaRt")
+
+# Load the required packages
+library(clusterProfiler)
+library(org.Hs.eg.db)  # Replace with appropriate organism database if needed
+library(KEGGREST)
+library(biomaRt)
+
+
+# Connect to Ensembl BioMart
+ensembl <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+# Retrieve all GO terms with descriptions
+go_terms <- getBM(attributes = c("go_id", "name_1006"), mart = ensembl)
+
+# Filter GO terms related to glycosylation
+glycosylation_terms <- go_terms[grep("glycosylation", go_terms$name_1006, ignore.case = TRUE), ]
+print(glycosylation_terms)
+
+# Define glycosylation-related GO terms
+go_glycosylation_terms <- c("GO:0070085",  # glycosylation
+                            "GO:0006486",  # protein glycosylation
+                            "GO:0006487",  # protein N-linked glycosylation
+                            "GO:0016757",  # Glycosyltransferase activity
+                            "GO:0008373")  # Sialyltransferase activity
+                            
+                            
+# Retrieve genes associated with these GO terms
+go_gene_list <- bitr(go_glycosylation_terms, fromType="GO", toType="SYMBOL", OrgDb="org.Hs.eg.db")
+go_genes <- unique(go_gene_list$SYMBOL)
+
+# Define the KEGG pathway ID for N-Glycan biosynthesis
+kegg_pathway <- "hsa00510"
+
+# Retrieve pathway information using KEGGREST
+pathway_info <- keggGet(kegg_pathway)
+
+# Extract gene information from the pathway
+genes_info <- pathway_info[[1]]$GENE
+
+# Extract the gene symbols from the gene information
+# The GENE information is usually in pairs, with the gene ID and gene symbol
+kegg_genes <- genes_info[seq(2, length(genes_info), by = 2)]
+# Remove full name; only keep short gene symbols in front of ";".
+kegg_genes <- sub(";.*", "", genes_info[seq(2, length(genes_info), by = 2)])
+
+# View the first few gene symbols
+head(kegg_genes)
+
+
+# Combine the gene lists
+Human_Glycan_genes <- unique(c(go_genes, kegg_genes))
+
+# Display the combined list of genes
+head(Human_Glycan_genes)
+
+write.table(Human_Glycan_genes, file = paste0(dir, "/Glycosylation/Human_Glycan_genes.csv"), row.names = FALSE, col.names = FALSE)
+
+
+# Convert human gene list to mouse gene list
+
+#1. Using Ensembl BioMart:
+#Step 1: Go to Ensembl BioMart. http://useast.ensembl.org/biomart/martview/ddb6a8a9b63022bac899752b346fc273
+
+#Step 2: Select the database Ensembl Genes and choose Homo sapiens as your dataset.
+#Step 3: Under Filters, expand the GENE section and input your human gene symbols in the "Gene names" filter.
+#Step 4: Under Attributes, go to Homologs and select Mouse orthologs. Choose Mouse gene name or Mouse Ensembl gene ID.
+#Step 5: Click Results to get the corresponding mouse gene symbols.
+#Step 6: Edit - remove blank rows, human column, save
+
+mouse_Glycan_genes <- read.csv(file.path(dir,"Glycosylation/mouse_Glycan_genes.csv"), sep=",",header=T)
+
+```
+
+5. Virtualize glycosylation-related genes
+```{r}
+# Step 1: Convert csv into character
+mouse_Glycan_genes <- as.character(mouse_Glycan_genes)
+
+# Step 2: Clean up the string by removing unwanted characters
+mouse_Glycan_genes <- gsub("c\\(|\\)", "", mouse_Glycan_genes)
+
+# Step 3: Split the string into a vector
+mouse_Glycan_genes <- unlist(strsplit(mouse_Glycan_genes, split = ",\\s*"))
+
+# Step 4: Remove any remaining quotes
+mouse_Glycan_genes <- gsub("\"", "", mouse_Glycan_genes)
+
+# Now `gene_vector` is a clean character vector of gene names
+print(mouse_Glycan_genes)
+
+# Label glyco-related genes in Volcano plot
+Volcano_4T1_glyco <- EnhancedVolcano(resp_table_4T1, lab=rownames(resp_table_4T1), x="log2FoldChange", y="padj", selectLab = mouse_Glycan_genes, title= plotname_4T1, xlim = c(-8,8), ylim=c(0,120), pointSize = 1, pCutoff=10e-5, FCcutoff=0.25, labSize=4)  # One or more p-values is 0. Converting to 10^-1 * current lowest non-zero p-value
+  print(Volcano_4T1_glyco) # export 7.5, 10
+  
+
+# Retrieve glyco-related DGE (padj < 0.05)
+Glycan_genes_4T1 <- subset(resp_table_4T1, rownames(resp_table_4T1) %in% mouse_Glycan_genes & padj < 0.05)
+Glycan_genes_4T1 <- Glycan_genes_4T1[order(Glycan_genes_4T1$log2FoldChange,decreasing = T),]
+write.table(Glycan_genes_4T1, file=paste(dir, "/Glycosylation/4T1_sig_Glycan_genes.tsv",sep=""), sep='\t', row.names=T)
+
+# Extract the log2 fold changes
+lfc_4T1_Glycan_genes <- as.matrix(Glycan_genes_4T1$log2FoldChange)
+
+# Ensure row names (gene names) are preserved
+rownames(lfc_4T1_Glycan_genes) <- rownames(Glycan_genes_4T1)
+
+# Plot the heatmap
+pheatmap(lfc_4T1_Glycan_genes,
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,  # Set to TRUE if you have multiple conditions (columns)
+         show_rownames = TRUE,
+         show_colnames = FALSE,  # Set to TRUE if you have multiple conditions (columns)
+         color = colorRampPalette(c("blue", "white", "red"))(50),
+         main = "Glycosylation-related gene: 4T1_TGFβ vs 4T1_Ctrl") # Zoom to ideal size, save image as png
+
+```
+
+
+
+```{r}
+# Read DESeq2 CSV
+resp_table_4T1 <- read.table("/Users/xiaohanning/Partners HealthCare Dropbox/Ning Xiaohan/BT549_4T1_TGFb_bulk_rnaseq/DEseq2/4T1_TGFb_vs_Ctrl.deseq2_output.tsv",sep="\t")
+mouse_Glycan_genes <- read.csv(file.path(dir,"Glycosylation/mouse_Glycan_genes.csv"), sep=",",header=T)
+mouse_Glycan_genes <- as.vector(mouse_Glycan_genes$V1)
+plotname_4T1 <- "4T1-TGFb vs 4T1-Ctrl"
+
+# Label glyco-related genes in Volcano plot
+sig_4T1_genes <- rownames(Glycan_genes_4T1)
+top10 <- sig_4T1_genes[c(1:10)]
+bottom10 <- sig_4T1_genes[(length(sig_4T1_genes)-9):length(sig_4T1_genes)]
+colored <- which(rownames(resp_table_4T1) %in% c(top10,bottom10))
+notcolored <- setdiff(1:nrow(resp_table_4T1),colored)
+resp_ordered <- resp_table_4T1[c(notcolored,colored),]
+
+keyvals.colour <- ifelse(rownames(resp_ordered) %in% top10, 'red',ifelse(rownames(resp_ordered) %in% bottom10,"blue",'grey'))
+keyvals.colour[is.na(keyvals.colour)] <- "grey"
+names(keyvals.colour)[keyvals.colour == "red"] <- 'Up'
+names(keyvals.colour)[keyvals.colour == "blue"] <- 'Down'
+names(keyvals.colour)[keyvals.colour == "grey"] <- 'All'
+Volcano_4T1_glyco <- EnhancedVolcano(resp_ordered, lab=rownames(resp_ordered), x="log2FoldChange", y="padj",colCustom = keyvals.colour, selectLab = c(top10, bottom10), drawConnectors = T,max.overlaps = 50,title= plotname_4T1, xlim = c(-8,8), ylim=c(0,120), pointSize = 2, pCutoff=10e-5, FCcutoff=0.25, colConnectors = "grey50",labSize=4)  # One or more p-values is 0. Converting to 10^-1 * current lowest non-zero p-value
+  print(Volcano_4T1_glyco)
+# Sort points
+  
+```
+
+Venn Diagram of overlapping genes between BT549 and 4T1
+```{r}
+install.packages("VennDiagram")
+library(VennDiagram)
+
+BT549_sig_Glycan_genes <- read.table(file.path(dir,"Glycosylation/BT549_sig_Glycan_genes.tsv"), sep="\t",header=T,row.names=1)
+BT549_sig_up_Glycan_genes <- BT549_sig_Glycan_genes[BT549_sig_Glycan_genes$log2FoldChange>0,]
+write.table(BT549_sig_up_Glycan_genes, file=file.path(dir,"Glycosylation/BT549_sig_up_Glycan_genes.tsv"), sep='\t', row.names=T)
+
+BT549_sig_up_Glycan_genes <- rownames(BT549_sig_up_Glycan_genes)
+
+sig_up_Glycan_genes_4T1 <- read.table(file.path(dir,"/Glycosylation/4T1_sig_up_Glycan_genes_convert_Human_symbol.tsv"), sep="\t",header=T)
+sig_up_Glycan_genes_4T1 <- sig_up_Glycan_genes_4T1$Human.gene.name
+
+# Generate the Venn diagram
+venn.plot <- venn.diagram(
+  x = list(
+    List1 = BT549_sig_up_Glycan_genes,
+    List2 = sig_up_Glycan_genes_4T1
+  ),
+  category.names = c("BT549", "4T1"),
+  filename = NULL,  # To print directly to R plot viewer
+  fill = c("grey", "orange"),
+  alpha = 0.9,
+  cat.cex = 2,
+  cat.pos = c(-10, 10),
+  cat.dist = c(0.06, 0.05),
+  cat.col = c("black", "black"),
+  cat.fontface = "bold",
+  lwd = 3,
+  cex = 0,  # Hide the counts
+  main = "Glycan-related genes upregulated by TGFβ",
+  main.fontface = "bold",
+  main.cex = 2
+)
+
+# Draw the Venn diagram
+grid.draw(venn.plot)
+
+# Add labels for the overlapping genes
+
+# Find the overlaps and unique genes
+overlap_genes <- intersect(BT549_sig_up_Glycan_genes, sig_up_Glycan_genes_4T1)
+unique_BT549 <- setdiff(BT549_sig_up_Glycan_genes, sig_up_Glycan_genes_4T1)
+unique_4T1 <- setdiff(sig_up_Glycan_genes_4T1, BT549_sig_up_Glycan_genes)
+
+# grid.text(
+  #label = paste(overlap_genes, collapse = "\n"),
+  #x = 0.52,   # X position of text (adjust as needed)
+  #y = 0.55,   # Y position of text (adjust as needed)
+ # gp = gpar(col = "black", fontsize = 12, fontface = "bold")  # Customize appearance
+#)
+
+library(grid)
+
+# Define the number of columns
+num_columns <- 2
+
+# Determine the number of genes per column
+num_genes <- length(overlap_genes)
+num_rows <- ceiling(num_genes / num_columns)
+
+# Create a matrix with NA or empty strings to handle uneven column lengths
+genes_matrix <- matrix(c(overlap_genes, rep(" ", num_columns * num_rows - num_genes)), 
+                       nrow = num_rows, ncol = num_columns, byrow = TRUE)
+
+# Draw text in columns
+# grid.newpage()  # Start a new page for drawing
+
+# Loop through the matrix and draw each gene in the correct position
+for (i in 1:num_rows) {
+  for (j in 1:num_columns) {
+    grid.text(
+      label = genes_matrix[i, j],
+      x = 0.45 + (j - 1) * 0.14,  # Adjust x spacing for each column
+      y = 0.58 - (i - 1) * 0.05,  # Adjust y spacing for each row
+      just = c("center", "center"),
+      gp = gpar(col = "black", fontsize = 16, fontface = "bold")
+    )
+  }
+}
+
+grid.draw(grobTree(
+  grid.text("16", 
+            x = 0.2,  # X position of text (adjust as needed)
+            y = 0.47, # Y position of text (adjust as needed)
+            gp = gpar(col="black", fontsize=20, fontface="bold")),
+  grid.text("13", 
+            x = 0.82, 
+            y = 0.47, 
+            gp = gpar(col="black", fontsize=20, fontface="bold"))
+))
+
+```
+
+
+
