@@ -1,0 +1,254 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+rm(list=ls())
+library(tidyr)
+library(dplyr)
+library(patchwork)
+library(ggplot2)
+library(readxl)
+library(TCGAbiolinks)
+library(survival)
+library(survminer) 
+library(GenomicRanges)
+library(GenomicFeatures)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+library(tximport)
+library(ggpubr)
+library(DESeq2)
+library(org.Hs.eg.db)
+library(msigdbr)
+# Main RTCGA package
+library("RTCGA")
+# Install the clinical and mRNA gene expression data packages
+library("RTCGA.clinical")
+library("RTCGA.mRNA")
+```
+
+Survival analysis from excel sheet copied directly from Human Protein Atlas
+```{r}
+# Tmem165
+tmem <- read_excel("~/Partners HealthCare Dropbox/Ning Guan/Lab Work- Alexa Mitchell/Spring_2025/TCGA BRCA Analysis/Breast TMEM165 Survival.xlsx")
+slc <- read_excel("~/Partners HealthCare Dropbox/Ning Guan/Lab Work- Alexa Mitchell/Spring_2025/TCGA BRCA Analysis/Breast SLC35A2 Survival.xlsx")
+
+#description<-data.frame(do.call('rbind', strsplit(as.character(tmem$Description), ', ', fixed=TRUE)))
+data_split <- slc %>%
+  separate(Description, into = c("age", "gender", "ethnicity", "stage", "status", "days"), sep = ", ", fill = "left")
+data_split <- data_split %>%
+  mutate(event = if_else(status == "alive", 0, 1))
+data_split$time <- as.numeric(gsub(" days","",data_split$days))/365
+data_split <- data_split[order(data_split$TPM),]
+colnames(data_split)[8] = "SLC35A2"
+data_split$Sample <- gsub("-01A","",data_split$Sample)
+
+tmem.cut <- surv_cutpoint(data_split, time = "time", event = "event",
+   variables = c("TPM"))
+summary(tmem.cut) # TMEM165: -0.0978, SLC35A2: 0.378
+tmem.cat <- surv_categorize(tmem.cut)
+head(tmem.cat)
+colnames(tmem.cat)[3] <- "Tmem165"
+
+
+tmem.fit <- survfit(Surv(time, event) ~Tmem165, data = tmem.cat)
+pvalue = surv_pvalue(tmem.fit)$pval.txt
+ggsurvplot(tmem.fit, risk.table = TRUE, conf.int = F,pval=pvalue,ggtheme = theme_classic2(base_size=17))
+```
+2. Survival and expression analysis using full RNA-seq data downloaded from TCGA-BRCA
+```{r}
+queryt <- GDCquery(project = "TCGA-BRCA",
+                   data.category = "Transcriptome Profiling",
+                   data.type = "Gene Expression Quantification",
+                   workflow.type = "STAR - Counts",
+                   sample.type = "Primary Tumor")
+queryc <- GDCquery(project = "TCGA-BRCA",
+                   data.category = "Transcriptome Profiling",
+                   data.type = "Gene Expression Quantification",
+                   workflow.type = "STAR - Counts",
+                   sample.type = "Solid Tissue Normal")
+```
+```{r}
+GDCdownload(queryt)
+GDCdownload(queryc)
+brca.exp <- GDCprepare(queryt, 
+                       save = TRUE,
+                       save.filename = "~/Partners HealthCare Dropbox/Ning Guan/Lab Work- Alexa Mitchell/Spring_2025/TCGA BRCA Analysis/brca",
+                       summarizedExperiment = TRUE)
+norm.exp <- GDCprepare(queryc, 
+                       save = TRUE, 
+                       save.filename = "~/Partners HealthCare Dropbox/Ning Guan/Lab Work- Alexa Mitchell/Spring_2025/TCGA BRCA Analysis/brca_norm",
+                       summarizedExperiment = TRUE)
+#Bind the Normal Samples and Tumor samples into one summarizedExperiment
+#'pathology_report_uuid', 'days_to_sample_procurement', 'preservation_method' are unique, need to remove
+colData(brca.exp) <- colData(brca.exp)[!(names(colData(brca.exp))) %in% c('pathology_report_uuid', 'days_to_sample_procurement',"figo_stage","figo_staging_edition_year")]
+brca.exp = cbind(brca.exp,norm.exp)
+def <- colData(brca.exp)$definition
+def[def=="Primary solid Tumor"] <- "Primary"
+def[def=="Solid Tissue Normal"] <- "Normal"
+colData(brca.exp)$definition <- factor(def)
+```
+```{r}
+# Get all the transcript_ids (Ensembl gene ID with version)
+assay_data <- assay(brca.exp)
+transcript_ids <- rownames(assay_data)
+```
+
+This plots expression level of Tmem165 or Slc35a2 in Tumor vs. Normal 
+```{r}
+brca.dds <- DESeqDataSet(brca.exp, design = ~definition) #56602 genes initially
+keep <- rowSums(counts(brca.dds)) >= 10 # Keep genes with total counts >= 10
+brca.dds <- brca.dds[keep,] # Keeping 48628 elements
+brca.dds$definition <- relevel(brca.dds$definition, ref = "Normal")
+brca.dds <- DESeq(brca.dds)
+brca.vsd <- vst(brca.dds, blind=FALSE) # Generate normalized counts from raw counts
+saveRDS(brca.vsd, "~/Partners HealthCare Dropbox/Ning Guan/Lab Work- Alexa Mitchell/Spring_2025/TCGA BRCA Analysis/brca.rds")
+brca.dds <- readRDS("~/Partners HealthCare Dropbox/Ning Guan/Lab Work- Alexa Mitchell/Spring_2025/TCGA BRCA Analysis/brca.rds")
+
+# Plot TMEM165 or SLC35A2 expression
+tmem165 <- assay(brca.dds)["ENSG00000134851.13",]
+slc35a2 <- assay(brca.dds)["ENSG00000102100.16",]
+dft <- data.frame("NormCount" = tmem165, "Definition" = brca.dds@colData$definition)
+dfs <- data.frame("NormCount" = slc35a2, "Definition" = brca.dds@colData$definition)
+ggboxplot(df,x="Definition",y="NormCount",color="Definition",add="jitter", add.params = list(size = 1, alpha = 0.5),order=c("Normal","Primary"))+ labs(y="SLC35A2")+
+  theme(plot.title=element_text(hjust=0.5),axis.text.x=element_text(angle=45, vjust=0.5,hjust=0.5),legend.position="none",axis.title.x = element_blank())
+ggplot(df, aes(x = Definition, y = NormCount)) +
+  labs(y="TMEM165")+
+  geom_jitter(aes(color = factor(Definition)), width=0.3,size = 1, alpha = 0.5) +
+  geom_boxplot(aes(fill = factor(Definition)), width = 0.8, alpha = 0)+
+  stat_compare_means(method="t.test",label="p.format",hide.ns = T,comparisons = list(c(1,2)))+
+  theme(panel.grid = element_blank(),
+        panel.background = element_blank(), axis.line = element_line(colour = "black"),
+        plot.title=element_text(hjust=0.5,size=13),
+        axis.text.x=element_text(angle=45, vjust=0.5,hjust=0.5,size=13),
+        legend.position="none",axis.title.x = element_blank())
+```
+```{r}
+# Add PAM50 information (Breast cancer subtypes) to metadata
+pam50 <- read_excel("~/Partners HealthCare Dropbox/Ning Guan/Lab Work- Alexa Mitchell/Spring_2025/TCGA BRCA Analysis/Supplementary Tables 1-4.xls",sheet="SuppTable1",skip=1)
+#head(brca.exp)
+
+colData_dds <- as.data.frame(colData(brca.dds))
+srt_pam50 <- pam50[match(colData_dds$patient,pam50$`Complete TCGA ID`),]
+colData_dds$PAM50 <- srt_pam50$`PAM50 mRNA`
+colData(brca.dds) <- DataFrame(colData_dds)
+brca.dds
+```
+Get the EnsemblIDs for a gene list, for calculation of gene list score 
+```{r}
+transcript_ids <- rownames(brca.dds)
+# Get transcript names from list
+human_glycan = read.csv("~/Partners HealthCare Dropbox/Ning Guan/Lab Work- Alexa Mitchell/Spring_2025/TCGA BRCA Analysis/Re_ Survival Plots/Human_Glycan_genes.csv",header=F)
+human_glycan$ENSEMBL <- mapIds(org.Hs.eg.db, keys = as.character(human_glycan$V1), column = "ENSEMBL", keytype = "SYMBOL", multiVals = "first")
+human_glycan_EnsemblIDs <- transcript_ids[grepl(paste(human_glycan$ENSEMBL, collapse = "|"), transcript_ids)] 
+
+bt549_glycan = read.csv("~/Partners HealthCare Dropbox/Ning Guan/Lab Work- Alexa Mitchell/Spring_2025/TCGA BRCA Analysis/Re_ Survival Plots/BT549_sig_up_Glycan_genes.tsv",sep="\t")
+bt549_glycan$ENSEMBL <- mapIds(org.Hs.eg.db, keys = as.character(bt549_glycan$x), column = "ENSEMBL", keytype = "SYMBOL", multiVals = "first")
+pattern <- paste(bt549_glycan$ENSEMBL, collapse = "|")
+bt549_glycan_EnsemblIDs <- transcript_ids[grepl(pattern, transcript_ids)] #ENSG00000102100.16
+
+overlap_genes = c("PGM3","ST6GAL1","GOLGA2","EDEM3","GMPPB","SERP1","COG6","B4GALT1","EXTL3","ST3GAL2","TMEM165")
+overlap_ensembl <- mapIds(org.Hs.eg.db, keys = as.character(overlap_genes), column = "ENSEMBL", keytype = "SYMBOL", multiVals = "first")
+overlap_EnsemblIDs <- transcript_ids[grepl(paste(overlap_ensembl,collapse="|"), transcript_ids)]
+# Get SIALYLTRANSFERASE genes 
+human_gene_sets = msigdbr(species = "Homo sapiens")
+msigdbr_collections()
+human_GO = human_gene_sets %>% dplyr::filter(gs_cat == "C5")
+sialytransferase_table = human_GO %>% dplyr::filter(gs_name == "GOMF_SIALYLTRANSFERASE_ACTIVITY")
+sialytransferase_genes = as.vector(sialytransferase_table$ensembl_gene)
+sialytransferase_EnsemblIDs <- transcript_ids[grepl(paste(sialytransferase_genes,collapse="|"), transcript_ids)] # 21 Genes in GO term for Sialytransferase activity
+```
+
+Calculate and add gene list scores into metadata
+```{r}
+# Calculate gene set scores
+bt549_set <- brca.vsd[bt549_glycan_EnsemblIDs,]
+bt549_glycan_score <- colMeans(assay(bt549_set))
+glycan_set <- brca.vsd[human_glycan_EnsemblIDs,]
+glycan_score <- colMeans(assay(glycan_set))
+overlap_score <- colMeans(assay(brca.vsd[overlap_EnsemblIDs,]))
+sialytransferase_score <- colMeans(assay(brca.vsd[sialytransferase_EnsemblIDs,]))
+colData(brca.vsd)$bt549_glycan_score <- bt549_glycan_score
+colData(brca.vsd)$human_glycan_score <- glycan_score
+colData(brca.vsd)$overlap_glycan_score <- overlap_score
+colData(brca.vsd)$sialytransferase_score <- sialytransferase_score
+```
+
+Plot expression level of a gene or averaged gene list score, in Normal, Primary tumor, and across subtypes
+```{r}
+tmem165 <- assay(brca.dds)["ENSG00000134851.13",]
+slc35a2 <- assay(brca.dds)["ENSG00000102100.16",]
+
+dft <- data.frame(Sample=colData(brca.dds)[c("sample_submitter_id")],"TMEM165" = tmem165,"SLC35A2"=slc35a2, "Definition" = brca.dds@colData$definition,"PAM50"=brca.dds@colData$PAM50)
+dft.PAM50 <-dft[dft$PAM50 %in% c("Basal-like","HER2-enriched","Luminal A","Luminal B"),]
+dft.PAM50$Definition <- dft.PAM50$PAM50
+dft.all <- rbind(dft,dft.PAM50)
+dft.all$Definition <- factor(dft.all$Definition, levels=c("Normal","Primary","Luminal A","Luminal B","HER2-enriched","Basal-like"))
+df <- data.frame("NormCount"=slc35a2,"Definition" = brca.dds@colData$definition,"PAM50"=brca.dds@colData$PAM50)
+df.PAM50 <-df[df$PAM50 %in% c("Basal-like","HER2-enriched","Luminal A","Luminal B"),]
+df.PAM50$Definition <- df.PAM50$PAM50
+df.all <- rbind(df,df.PAM50)
+df.all$Definition <- factor(df.all$Definition, levels=c("Normal","Primary","Luminal A","Luminal B","HER2-enriched","Basal-like"))
+
+ggplot(dft.all, aes(x = Definition, y = NormCount)) +
+  labs(y="Tmem165")+
+  geom_jitter(aes(color = factor(Definition)), width=0.3,size = 1, alpha = 0.5) +
+  geom_boxplot(aes(fill = factor(Definition)), width = 0.8, alpha = 0)+
+  stat_compare_means(method="t.test",label="p.format",hide.ns = T,comparisons = list(c(1,2),c(1,3),c(1,4),c(1,5),c(1,6)))+#label.y=c(14,14.5,15,15.5,16)
+  theme(panel.grid = element_blank(),
+        panel.background = element_blank(), axis.line = element_line(colour = "black"),
+        axis.title=element_text(hjust=0.5,size=15),
+        axis.text.y = element_text(size=13),
+        axis.text.x=element_text(angle=45, vjust=0.5,hjust=0.5,size=15),
+        legend.position="none",axis.title.x = element_blank())
+
+```
+Survival analysis using a gene list score 
+```{r}
+# Add glycosylation pathway scores to metadata of brca.dds or brca.vsd
+tumor.vsd <- brca.vsd[,brca.vsd$definition=="Primary"]
+# Calculate glycosylation pathway score and add to data.split
+tumor_glyco_scores <- as.data.frame(colData(tumor.vsd)[c("sample_submitter_id","bt549_glycan_score","human_glycan_score","overlap_glycan_score","sialytransferase_score")])
+# Add glyco_scores to data_split
+data_merge <- merge(data_split,dft.PAM50, by.x="Sample",by.y="sample_submitter_id")
+data_merge <- data_merge[!duplicated(data_merge$Sample),]
+data_merge <- data_merge %>% 
+  mutate(CTL_score=cut(CTL_score, breaks=c(0, median(data_merge$CTL_score), Inf), labels=c(" low", "high"))) # TMEM165: 55.7, SLC35A2: 52.7
+
+# Calculate cutoff
+glycan.cut <- surv_cutpoint(data_merge, time = "time", event = "event",
+   variables = c("bt549_glycan_score","sialytransferase_score","overlap_glycan_score"))
+summary(glycan.cut) # TMEM165: -0.0978, SLC35A2: 0.378
+glycan.cat <- surv_categorize(glycan.cut)
+head(glycan.cat)
+
+glycan.fit <- survfit(Surv(time, event) ~overlap_glycan_score, data = glycan.cat)
+pvalue = surv_pvalue(glycan.fit)$pval.txt
+ggsurvplot(glycan.fit, risk.table = TRUE, conf.int = F,xlim=c(0,11),pval=pvalue,ggtheme = theme_classic2(base_size=15))
+```
+# Start
+```{r}
+data_subtypes = merge(data_split,pam50[c("Complete TCGA ID", "PAM50 mRNA")], by.x="Sample",by.y="Complete TCGA ID")
+data_subtypes <-data_subtypes[data_subtypes$`PAM50 mRNA` %in% c("Basal-like","HER2-enriched","Luminal A","Luminal B"),]
+subtypes = c("Basal-like","HER2-enriched","Luminal A","Luminal B")
+plist <- list()
+for(i in 1:4){
+  sub = subtypes[i]
+  print(sub)
+  data_sub <- data_subtypes[data_subtypes$`PAM50 mRNA`==sub,]
+  print(dim(data_sub))
+  #data_sub <- data_sub %>% mutate(TMEM165=cut(TMEM165, breaks=c(0, median(data_sub$TMEM165), Inf), labels=c(" low", "high")))
+  glycan.cut <- surv_cutpoint(data_sub, time = "time", event = "event",variables = c("SLC35A2"))
+  summary(glycan.cut) # TMEM165: -0.0978, SLC35A2: 0.378
+  glycan.cat <- surv_categorize(glycan.cut)
+  head(glycan.cat)
+  # Fit 
+  glycan.fit <- survfit(Surv(time, event) ~SLC35A2, data =glycan.cat)
+  pvalue = surv_pvalue(glycan.fit)$pval.txt
+  plist[[i]] <- ggsurvplot(glycan.fit, risk.table = TRUE, conf.int = F,xlim=c(0,11),pval=pvalue,ggtheme = theme_classic2(base_size=15))
+}
+ggarrange(plist[[1]],plist[[2]],plist[[3]],plist[[4]],ncol=2,nrow=2)
+```
+

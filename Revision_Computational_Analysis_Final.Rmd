@@ -1,0 +1,527 @@
+---
+title: "Breast Cancer EMT Paper Revision Computational Analysis"
+output: html_notebook
+---
+
+```{r}
+library(readxl)
+library(ggrepel)
+library(ggplot2)
+library(tidyverse)
+library(msigdbr)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(org.Hs.eg.db)
+library(EnhancedVolcano)
+library(openxlsx)
+library(ComplexHeatmap)
+rm(list=ls())
+```
+
+1. Computational Analysis 1
+```{r}
+# Get list of glycosylation-related genes from 5 GO glyco gene sets
+mouse_gene_sets = msigdbr(species = "Mus musculus")
+msigdbr_collections()
+mouse_GO = mouse_gene_sets %>% dplyr::filter(gs_cat == "C5")
+go_glycosylation_terms <- c("GOBP_GLYCOSYLATION", "GOBP_REGULATION_OF_PROTEIN_GLYCOSYLATION", "GOBP_PROTEIN_N_LINKED_GLYCOSYLATION","GOMF_GLYCOSYLTRANSFERASE_ACTIVITY",
+                            "GOMF_SIALYLTRANSFERASE_ACTIVITY")
+glycosylation_table = mouse_GO %>% dplyr::filter(gs_name %in% go_glycosylation_terms)
+glycosylation_genes = as.vector(unique(glycosylation_table$human_gene_symbol))
+```
+
+```{r}
+dir = "~/Partners HealthCare Dropbox/Ning Guan/Bulk RNA-seq Alexa with Xiaohan/PyMT"
+outdir = "~/Partners HealthCare Dropbox/Ning Guan/computational analysis/Question 1"
+ctrl_res <- as.data.frame(read.table(file=file.path(dir,'controlpb3_vs_controlpb2.deseq2_output.padj_ordered.tsv'), header=T))
+```
+
+Differentially expressed glycosylation genes
+```{r}
+de_genes <- function(data, genes){
+  res <- data[rownames(data) %in% genes,]
+  res <- res[(!is.na(res$padj)) & res$padj < 0.05 & abs(res$log2FoldChange) > 2,]
+  res <- res[order(res$log2FoldChange,decreasing=T),]
+  return(res)
+}
+ctrl_glyco <- de_genes(ctrl_res, glycosylation_genes)
+# Make an excel sheet with these genes pb3_vs_pb2
+genesets <- list("ctrlpb3_vs_ctrlpb2_glyco"=ctrl_glyco)
+write.xlsx(genesets,file.path(outdir,"Pb3_Pb2_Bulk_glycosylation_genes.xlsx"),rowNames=T)
+```
+
+1b. Human TNBC scRNA-seq analysis 
+```{r}
+library(tidyverse)
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(ggplot2)
+library(reshape2)
+library(pheatmap)
+library(msigdbr)
+library(infercnv)
+library(stringr)
+library(readxl)
+library(RColorBrewer)
+library(openxlsx)
+library(harmony)
+library(fgsea)
+library(SeuratWrappers)
+library(ggrepel)
+library(SeuratBubblePlot)
+library(ppcor)
+library(enrichR)
+library(EnhancedVolcano)
+library(patchwork)
+library(RcppML)
+library(Matrix)
+set.seed(10)
+```
+
+1c. Bigger human breast data analysis
+```{r}
+dir <- "/n/data2/dfci/cancerimm/wucherpfennig/Alexa/nig060/Breast_Cancer_Revisions"
+```
+```{r}
+options(future.globals.maxSize = 128000 * 1024^2)
+meta <- read.csv(file.path(dir,"Xu_etal_2024_scRNAseq/metadata.csv"),row.names=1)
+humanbc <- Read10X(data.dir = file.path(dir, "Xu_etal_2024_scRNAseq/filtered_feature_bc_matrix"),gene.column = 1)
+humanbc <- CreateSeuratObject(counts = humanbc,min.features=200,min.cells=10,meta.data=meta)
+humanbc # 34764 genes x 236169 cells (cells already filtered, better to filter genes?)
+#humanbc <- subset(humanbc, subset = orig.ident %in% c("Palprim","Qian","Wu","Wu2021prim")) #176109 cells 
+Idents(humanbc) <- "Cell_Type_Annotation"
+#humanbc.sub <- humanbc[,sample(colnames(humanbc),size=50000,replace=F)]
+#tnbc <- subset(humanbc,subset=Clinical_Subtype=="TNBC") # 76451 samples
+```
+```{r}
+bubbleplot(obj.integrated,features_plot = c("EPCAM","CDH1","KRT8","KRT18","KRT19","CLDN1","CLDN3","CLDN4","OCLN","DSP","TJP1","CDH2","VIM","FN1","SNAI1","SNAI2","ZEB1","ZEB2","TWIST1","ITGA5","ITGB1","COL1A1"),colors_use="Blues",cluster_y = T,cluster_x=T)
+```
+
+```{r}
+# UMAP of scRNA-seq data
+humanbc <- NormalizeData(object=humanbc)
+humanbc <- FindVariableFeatures(humanbc, selection.method = "vst", nfeatures = 2000)
+humanbc <- ScaleData(object = humanbc)
+humanbc <- RunPCA(object=humanbc)
+DimPlot(object=humanbc, reduction="pca",group.by="orig.ident",shuffle=T)
+```
+```{r}
+humanbc <- RunUMAP(humanbc, dims=1:30,reduction="pca")
+Idents(humanbc) <- "Cell_Type_Annotation"
+plot1 <- DimPlot(humanbc, reduction="umap",label=T,shuffle=T,repel=T)
+plot2 <- DimPlot(humanbc, reduction="umap", split.by="orig.ident",shuffle=T,ncol=3)
+plot1+plot2
+```
+
+Try Harmony on all cells (scTransform crashes due to cell number)
+```{r}
+# Run Harmony, after line 124
+humanbc <- RunHarmony(humanbc, "Patient_ID",reduction.use="pca",plot_convergence=T) # Harmonize over sample ids
+DimPlot(object=humanbc, reduction="harmony",group.by="orig.ident",shuffle=T)
+#humanbc <- FindNeighbors(humanbc,reduction="harmony",dim=1:30) 
+#humanbc <- FindClusters(humanbc, reduction="harmony",resolution=0.8)
+# Run UMAP on Harmonized PCs 
+Idents(humanbc) <- "Cell_Type_Annotation"
+humanbc <- RunUMAP(humanbc, dims=1:30, reduction="harmony",reduction.name="umap_harmony")
+p1 <- DimPlot(humanbc, reduction="umap_harmony",label=T,shuffle=T,repel=T)
+p2 <- DimPlot(humanbc, reduction="umap_harmony",group.by="orig.ident",shuffle=T)
+p3 <- DimPlot(humanbc, reduction="umap_harmony",group.by="Clinical_Subtype",shuffle=T)
+p1+p2
+saveRDS(humanbc, file.path(dir,"Xu_etal_2024_scRNAseq/human.bc.rds"))
+humanbc <- readRDS(file.path(dir,"Xu_etal_2024_scRNAseq/human.bc.rds"))
+```
+```{r}
+table(humanbc[[c("Cell_Type_Annotation")]])
+table(humanbc[[c("Clinical_Subtype","Molecular_Subtype")]])
+```
+```{r}
+# Featureplot
+FeaturePlot(humanbc,features=c("EPCAM","VIM","MKI67","PTPRC"),reduction="umap_harmony")
+```
+
+Focus on tumor cell subset
+```{r}
+# Rerun UMAP and do clustering on tumor cells only
+tumor.bc <- FindNeighbors(tumor.bc, reduction="harmony",dims=1:30)
+tumor.bc <- FindClusters(tumor.bc, reduction="harmony",resolution=0.2) # Identified 14 Clusters
+tumor.bc <- RunUMAP(tumor.bc, dims=1:30,reduction="harmony",reduction.name = "umapharm")
+plot1 <- DimPlot(tumor.bc, reduction="umapharm",label=T,shuffle=T,repel=T)+NoLegend()
+plot2 <- DimPlot(tumor.bc, reduction="umapharm",group.by="orig.ident",shuffle=T)
+#plot3 <- DimPlot(tumor.bc, reduction="umapharmony",group.by="Clinical_Subtype",shuffle=T)
+plot1+plot2
+```
+```{r}
+epi.markers <- c("EPCAM","CDH1","KRT8","KRT18","KRT19","CLDN1","CLDN3","CLDN4","OCLN","DSP","TJP1")
+mes.markers <- c("CDH2","VIM","FN1","SNAI1","SNAI2","ZEB1","ZEB2","TWIST1","ITGA5","ITGB1","COL1A1")
+tumor.bc <- AddModuleScore(tumor.bc, features=list(epi.markers),ctrl=10,name="Epi.Score")
+tumor.bc <- AddModuleScore(tumor.bc, features=list(mes.markers),ctrl=10,name="Mes.Score")
+colnames(tumor.bc@meta.data)[37:38] <- c("Epi.Score","Mes.Score")
+VlnPlot(tumor.bc, features=c("Epi.Score","Mes.Score"),pt.size=0.1)
+saveRDS(integrated.tumor,file.path(dir,"Xu_etal_2024_scRNAseq/integrated.tnbc.tumor.rds"))
+```
+
+```{r}
+#integrated.tumor <- JoinLayers(integrated.tumor, assay = "RNA")
+X <- GetAssayData(tumor.bc, assay = "RNA", layer = "data")
+
+# Often you reduce to variable features to speed up
+#vf <- VariableFeatures(tumor.bc)
+X <- X[vf, ]
+
+# X can be a matrix or a sparse dgCMatrix; must be >= 0
+k <- 10
+
+fit <- nmf(X, k = k, maxit = 500)  # returns list with w and d/h depending on version
+
+W <- fit$w  # features x k
+H <- fit$h  # k x samples  (sometimes named $h in some implementations)
+```
+```{r}
+rownames(W) <- rownames(X)
+colnames(W) <- paste0("NMF", seq_len(ncol(W)))
+top_genes <- lapply(seq_len(ncol(W)), function(j) {
+  rownames(W)[order(W[, j], decreasing = TRUE)][1:50]
+})
+names(top_genes) <- colnames(W)
+cell_groups <- apply(H, 2, which.max)
+table(cell_groups)
+tumor.bc$NMF_cluster2 <- factor(cell_groups)
+DimPlot(tumor.bc, group.by = "NMF_cluster2",label=T,shuffle = T,repel=T)
+```
+
+```{r}
+tumor.bc@meta.data %>%
+  group_by(NMF_cluster2) %>%
+  summarise(
+    mean_EMT = mean(Mes.Score-Epi.Score, na.rm = TRUE),
+    mean_epi = mean(Epi.Score, na.rm = TRUE),
+    mean_mes = mean(Mes.Score, na.rm = TRUE)
+  )
+```
+```{r}
+mes.markers <- FindMarkers(tumor.bc, ident.1=c(1,6,7),logfc.threshold=0.5)
+# Which of them are glysoylation related? 
+glycosylation_genes_human = as.vector(unique(glycosylation_table$db_gene_symbol))
+gly.mes <- mes.markers[rownames(mes.markers) %in% glycosylation_genes_human,]
+write.table(gly.mes,file=file.path(dir,"Xu_Human_NMF_Harmony_Mes_Epi_Glycosylation_Genes.txt"),sep="\t",row.names=T)
+table(tumor.bc[[c("Clinical_Subtype","NMF_cluster")]])
+```
+```{r}
+VlnPlot(tumor.bc, features=c("Epi.Score","Mes.Score"),pt.size=0.1)
+```
+
+```{r}
+# Get overlap with pb3 vs. pb2 data
+ctrl_glyco <- read.xlsx(file.path(dir,"Pb3_Pb2_Bulk_glycosylation_genes.xlsx"),sheet = "ctrlpb3_vs_ctrlpb2_glyco",rowNames=T)
+post_glyco <- read.xlsx(file.path(dir,"Pb3_Pb2_Bulk_glycosylation_genes.xlsx"),sheet = "postpb3_vs_postpb2_glyco",rowNames=T)
+gly.mes <- gly.mes[gly.mes$p_val_adj<0.05,]
+gly.mes.up <- gly.mes[gly.mes$avg_log2FC > 0,]
+colnames(gly.mes.up) <- paste(colnames(gly.mes.up),".human",sep="")
+ctrl_glyco_humanTNBC <- ctrl_glyco[ctrl_glyco$Human_symbol %in% rownames(gly.mes.up),] # 7 genes
+post_glyco_humanTNBC <- post_glyco[post_glyco$Human_symbol %in% rownames(gly.mes.up),]
+ctrl_glyco_humanTNBC <- merge(ctrl_glyco_humanTNBC,gly.mes.up, by.x="Human_symbol",by.y=0,all=F)
+post_glyco_humanTNBC <- merge(post_glyco_humanTNBC,gly.mes.up, by.x="Human_symbol",by.y=0,all=F)
+ctrl_glyco_humanTNBC <- ctrl_glyco_humanTNBC[order(ctrl_glyco_humanTNBC$log2FoldChange,decreasing=T),]
+post_glyco_humanTNBC <- post_glyco_humanTNBC[order(post_glyco_humanTNBC$log2FoldChange,decreasing=T),]
+human_mouse <- list("Pb3_Pb2_vs_Human_Mes"=ctrl_glyco_humanTNBC,"postpb3_pb2_vs_Human_Mes"=post_glyco_humanTNBC)
+write.xlsx(human_mouse,file.path(dir,"Pb3_Pb2_vs_Xu_Human_NMF_Harmony_Mes_vs_Epi_Glyco_genes.xlsx"))
+```
+
+
+2. CCLE data analysis
+```{r}
+rm(list=ls())
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(DESeq2)
+library(tximport)
+library(biomaRt)
+library(readr)
+library(readxl)
+library("vsn")
+library(EnhancedVolcano)
+library(msigdbr)
+library(pheatmap)
+library(openxlsx)
+library(limma)
+library(ggpubr)
+library(org.Hs.eg.db)
+```
+
+```{r}
+dir2 <- "~/Partners HealthCare Dropbox/Ning Guan/computational analysis"
+```
+```{r}
+tpm <- read.table(file.path(dir2,"Question 2/CCLE_RNAseq_rsem_genes_tpm_20180929.txt"),header=T,sep="\t", row.names = 1, check.names = FALSE)
+tpm <- as.matrix(tpm)
+tpm <- tpm[,2:dim(tpm)[2]]
+```
+```{r}
+mode(tpm) <- "numeric"
+tpm_log <- log2(tpm + 1)
+```
+```{r}
+# Add Epi and Mes scores to CCLE data 
+# Take top 25% and bottom 25% cell lines --> compare expression of TMEME165, 
+# Split breast cancer cell lines and do the same (maybe top and bottom 1/3)
+# Match gene names to ENSEMBL IDs
+rownames(tpm_log) <- sub("\\..*$", "", rownames(tpm_log))
+genenames <- AnnotationDbi::select(org.Hs.eg.db, keys= keys(org.Hs.eg.db, keytype="ENSEMBL"), columns=c("SYMBOL", "ENSEMBL"), keytype="ENSEMBL")
+resp_table <- merge(tpm_log, genenames, by.x=0, by.y="ENSEMBL")
+resp_table <- resp_table[!duplicated(resp_table$SYMBOL),]
+resp_table <- resp_table %>%  remove_rownames() %>% column_to_rownames(var = "SYMBOL")
+resp_table <- resp_table[,2:dim(resp_table)[2]]
+resp_table <- as.matrix(resp_table)
+```
+
+```{r}
+# Make metadata with EMT scores 
+epi.markers <- c("EPCAM","CDH1","KRT8","KRT18","KRT19","CLDN1","CLDN3","CLDN4","OCLN","DSP","TJP1")
+mes.markers <- c("CDH2","VIM","FN1","SNAI1","SNAI2","ZEB1","ZEB2","TWIST1","ITGA5","ITGB1","COL1A1")
+meta <- data.frame(matrix(ncol = 0, nrow = dim(resp_table)[2]))
+rownames(meta) <- colnames(resp_table)
+meta$Epi.Score <- colMeans(resp_table[intersect(epi.markers,rownames(resp_table)),])
+meta$Mes.Score <- colMeans(resp_table[intersect(mes.markers,rownames(resp_table)),])
+meta$EMT.Score <- (meta$Mes.Score - meta$Epi.Score)/(meta$Mes.Score + meta$Epi.Score)
+#meta$EMT.Score2 <- meta$Mes.Score - meta$Epi.Score
+```
+
+```{r}
+# Box Plot expression levels in Epi and Mes cell line
+# Output excel sheet
+sum(colnames(resp_table)==rownames(meta)) # The cell lines are order the same way in tpm_z and meta 
+meta$TMEM165 <- resp_table["TMEM165",]
+meta$SLC35A2 <- resp_table["SLC35A2",]
+meta$CEBPB <- resp_table["CEBPB",]
+# Pb3 vs. Pb2 glycosylation genes
+pb3_glyco = read.xlsx(file.path(dir2, "Question 1/Pb3_Pb2_Bulk_glycosylation_genes.xlsx"),sheet="ctrlpb3_vs_ctrlpb2_glyco",rowNames = T)
+pb3_glyco_genes = pb3_glyco[pb3_glyco$log2FoldChange>0,]$Human_symbol
+meta$pb3_glyco = colMeans(resp_table[intersect(pb3_glyco_genes,rownames(resp_table)),])
+# Calculate glycosylation signatures
+bt549_glycan = read.csv("~/Partners HealthCare Dropbox/Ning Guan/Lab Work- Alexa Mitchell/Spring_2025/TCGA BRCA Analysis/Re_ Survival Plots/BT549_sig_up_Glycan_genes.tsv",sep="\t")
+meta$BT549_glyco <- colMeans(resp_table[intersect(bt549_glycan$x,rownames(resp_table)),]) # 24 BT549 TGFb-induced glycosylation-related genes
+# 98 glycosylation genes upregulated in human breast Mes vs. Epi
+human_breast_glyco <- read.table(file.path(dir2, "Question 1/Xu_Human_NMF_Harmony_Mes_Epi_Glycosylation_Genes.txt"),sep="\t",header=T,row.names = 1)
+human_glyco_genes <- rownames(human_breast_glyco[human_breast_glyco$avg_log2FC > 1 & human_breast_glyco$p_val_adj<0.05,])
+meta$human_glyco = colMeans(resp_table[intersect(human_glyco_genes, rownames(resp_table)),])
+```
+
+```{r}
+# Plot expression of TMEM165, SLC35A2, and glycosylation gene signatures in breast cancer cell lines only
+meta.breast <- meta[grepl("BREAST", rownames(meta)),]
+```
+
+```{r}
+# Classify as Epi or Mes
+classify <- function(meta){
+  q1 <- quantile(meta$EMT.Score, 0.5)
+  q3 <- quantile(meta$EMT.Score, 0.5)
+  state <- rep("Intermediate", length(meta$EMT.Score))
+  state[meta$EMT.Score < q1] <- "Epi"
+  state[meta$EMT.Score >= q3] <- "Mes"
+  plot(density(meta$EMT.Score))
+  abline(v=c(q1,q3))
+  return(state)
+}
+meta.breast$state <- classify(meta.breast)
+```
+
+```{r}
+ggplot(meta.breast, aes(x = state, y = SLC35A2)) +
+  geom_jitter(aes(color = factor(state)), width=0.3,size = 1, alpha = 0.5) +
+  geom_boxplot(aes(fill = factor(state)), width = 0.8, alpha = 0)+
+  stat_compare_means(method="t.test",label="p.format",hide.ns = T,comparisons = list(c(1,2)))+
+  theme(panel.grid = element_blank(),
+        panel.background = element_blank(), axis.line = element_line(colour = "black"),
+        plot.title=element_text(hjust=0.5,size=13),
+        axis.text.x=element_text(angle=45, vjust=0.5,hjust=0.5,size=13),
+        legend.position="none",axis.title.x = element_blank())
+```
+
+
+3A. Validate TMEM165, SLC35A2, and glycosylation signatures and correlation with survival using an independent cohort
+```{r}
+# Load SCAN-B data 
+scanb <- read.csv(file.path(dir2,"Question 3/GSE96058_gene_expression_3273_samples_and_136_replicates_transformed.csv"),header=T,row.names=1)
+# Remove all the samples with technical replicates 
+scanb <- scanb[,(!grepl("repl", colnames(scanb)))] # 30865 genes x 3273 patient samples 
+scanb <- as.matrix(scanb)
+mode(scanb) <- "numeric"
+
+meta.scanb <- read.table(file.path(dir2, "Question 3/GSE96058-GPL11154_series_matrix.txt"),header=T,skip=63,sep="\t",nrows=69)
+meta.scanb2 <- read.table(file.path(dir2, "Question 3/GSE96058-GPL18573_series_matrix.txt"),header=T,skip=63,sep="\t",nrows=69)
+```
+```{r}
+# Merge and make meta data file containing Sample ID (colnames), PAM50, Survival, Event
+meta <- merge(meta.scanb,meta.scanb2[,2:dim(meta.scanb2)[2]], by=0)
+meta <- meta[,3:length(meta)]
+meta <- meta[,(!grepl("repl",colnames(meta)))]
+meta_scanb <- data.frame(matrix(ncol=0, nrow=length(meta)))
+rownames(meta_scanb) <- colnames(meta)
+meta_scanb$PAM50 <- sub("^pam50 subtype: ", "",meta[22,])
+meta_scanb$Survival <- sub("^overall survival days: ","",meta[24,])
+meta_scanb$Event <- sub("^overall survival event: ","",meta[25,])
+```
+```{r}
+# Order meta_scanb columns 
+meta_scanb <- meta_scanb[colnames(scanb), ]
+# Add TMEM165, SLC35A2, BT459_glyco, and Human_Glyco scores
+meta_scanb$TMEM165 <- scanb["TMEM165",]
+meta_scanb$SLC35A2 <- scanb["SLC35A2",]
+bt549_genes <- bt549_glycan$x
+meta_scanb$BT549_glyco <- colMeans(scanb[intersect(bt549_genes,rownames(scanb)),])
+meta_scanb$Human_glyco <- colMeans(scanb[intersect(human_glyco_genes,rownames(scanb)),])
+meta_scanb$Pb3_glyco <- colMeans(scanb[intersect(pb3_glyco_genes,rownames(scanb)),])
+meta_scanb$All_glyco <- colMeans(scanb[intersect(glycosylation_genes,rownames(scanb)),])
+# Save meta files
+write.table(meta_scanb,file.path(dir2,"Question 3/SCANB_meta_table_glycoscores.txt"),sep="\t",row.names = T)
+```
+
+```{r}
+# Plot TMEM165 or SLC35A2 expression levels by breast cancer subtypes
+meta_scanb$PAM50 <- factor(meta_scanb$PAM50, levels=c("Normal","LumA","LumB","Her2","Basal"))
+ggplot(meta_scanb, aes(x = PAM50, y = SLC35A2)) +
+  geom_jitter(aes(color = factor(PAM50)), width=0.3,size = 1, alpha = 0.5) +
+  geom_boxplot(aes(fill = factor(PAM50)), width = 0.8, alpha = 0)+
+  stat_compare_means(method="t.test",label="p.format",hide.ns = T,comparisons = list(c(1,2),c(1,3),c(1,4),c(1,5)))+
+  theme(panel.grid = element_blank(),
+        panel.background = element_blank(), axis.line = element_line(colour = "black"),
+        plot.title=element_text(hjust=0.5,size=13),
+        axis.text.x=element_text(angle=45, vjust=0.5,hjust=0.5,size=13),
+        legend.position="none",axis.title.x = element_blank())
+```
+
+3B. Comparison between Metastasis and primary tumors 
+```{r}
+# Get Raw counts
+# Do DEseq between metastasis and primary tumors
+# Get significantly DE gene list
+# Examine EMT profile, glycosylaiton related genes...
+counts <- read.table(file.path(dir2,"Question 3B Metastasis/GSE209998_AUR_129_raw_counts.txt"),header=T,sep="\t")
+series_matrix <- read.table(file.path(dir2, "Question 3B Metastasis/GSE209998_series_matrix.txt"),header=T,skip=88,sep="\t",nrows=44)
+counts <- counts[!duplicated(counts$X),]
+counts <- counts %>% remove_rownames() %>% column_to_rownames(var="X")
+```
+```{r}
+series_matrix <- series_matrix[,2:length(series_matrix)]
+meta <- data.frame(matrix(ncol = 0, nrow = length(counts)))
+rownames(meta) <- colnames(counts)
+meta$site <- sub("^disease: ", "",series_matrix[9,])
+meta$site <- sub(" .*", "", meta$site)
+meta$sampleID <- sub("^", "",series_matrix[22,])
+meta$patientID <- substr(meta$sampleID, 5, 8)
+```
+```{r}
+library(edgeR)
+library(limma)
+
+dge <- DGEList(counts = counts)
+dge <- calcNormFactors(dge)   # TMM normalization
+
+group <- factor(meta$site) # Primary, Metastasis, or Normal
+design <- model.matrix(~ 0 + group)
+colnames(design) <- levels(group)
+
+v <- voom(dge, design)
+fit <- lmFit(v, design)
+contr <- makeContrasts(
+  Met_vs_Primary = Metastatic - Primary,
+  Primary_vs_Normal = Primary - Normal,
+  Met_vs_Normal = Metastatic - Normal,
+  levels = design
+)
+fit2 <- eBayes(contrasts.fit(fit, contr))
+
+res.met_primary <- topTable(fit2,coef="Met_vs_Primary", number = Inf, sort.by = "P")
+# Save Res file and glycosylation file
+res.signf <- res.met_primary[(abs(res.met_primary$logFC) > 0.5 & res.met_primary$adj.P.Val <0.05), ]
+res.signf <- res.signf[order(res.signf$logFC,decreasing = T),]
+res.signf.glyco <- res.signf[rownames(res.signf) %in% glycosylation_genes, ]
+res.glyco.up <- rownames(res.signf.glyco[res.signf.glyco$logFC>0,])
+write.table(res.signf.glyco,file.path(dir2,"Question 3B Metastasis/Met_vs_Primary_glycogenes.txt"),sep="\t",row.names = T)
+```
+```{r}
+plot_volcano <- function(table, glist,title){
+  # Add lab for IFNa, IFNg, and MHC genes
+  resp_table <- table %>% mutate(label = ifelse(rownames(table) %in% glist, rownames(table),NA))
+  keyvals <- ifelse(
+    rownames(resp_table) %in% glist, 'red',
+        'lightgrey')
+  keyvals[is.na(keyvals)] <- 'lightgrey'
+  names(keyvals)[keyvals == 'red'] <- 'Glycosylation-related Genes'
+  EnhancedVolcano(resp_table, lab=resp_table$label, x="logFC", y="adj.P.Val",pCutoff=0.05, title= title,xlim=c(-4,4),ylim=c(0,18),colCustom = keyvals,pointSize = 1, FCcutoff=0.25, drawConnectors = TRUE,labSize=4,max.overlaps = 30)
+}
+plot_volcano(res.signf, rownames(res.signf.glyco),"Metastasis vs. Primary Breast Cancer")
+```
+
+```{r}
+UQN <- read.table(file.path(dir2,"Question 3B Metastasis/GSE209998_AUR_129_UQN.txt"),header=T,sep="\t")
+UQN <- UQN[!duplicated(UQN$X),]
+UQN <- UQN %>% remove_rownames() %>% column_to_rownames(var="X")
+expr <- log2(UQN + 1)
+```
+```{r}
+epi.markers <- c("EPCAM","CDH1","KRT8","KRT18","KRT19","CLDN1","CLDN3","CLDN4","OCLN","DSP","TJP1")
+mes.markers <- c("CDH2","VIM","FN1","SNAI1","SNAI2","ZEB1","ZEB2","TWIST1","ITGA5","ITGB1","COL1A1")
+# Calculate z-scores 
+
+epi_use <- intersect(epi.markers, rownames(expr))
+mes_use <- intersect(mes.markers, rownames(expr))
+
+meta$Epi_score <- colMeans(expr[epi_use, , drop = FALSE])
+meta$Mes_score <- colMeans(expr[mes_use, , drop = FALSE])
+
+meta$EMT_score <- (meta$Mes_score - meta$Epi_score)/(meta$Mes_score + meta$Epi_score)
+```
+```{r}
+expr <- as.matrix(expr)
+meta$TMEM165 <- expr["TMEM165",]
+meta$SLC35A2 <- expr["SLC35A2",]
+# Pb3 vs. Pb2 glycosylation genes
+pb3_glyco = read.xlsx(file.path(dir2, "Question 1/Pb3_Pb2_Bulk_glycosylation_genes.xlsx"),sheet="ctrlpb3_vs_ctrlpb2_glyco",rowNames = T)
+pb3_glyco_genes = pb3_glyco[pb3_glyco$log2FoldChange>0,]$Human_symbol
+meta$pb3_glyco = colMeans(expr[intersect(pb3_glyco_genes,rownames(expr)),])
+# Calculate glycosylation signatures
+bt549_glycan = read.csv("~/Partners HealthCare Dropbox/Ning Guan/Lab Work- Alexa Mitchell/Spring_2025/TCGA BRCA Analysis/Re_ Survival Plots/BT549_sig_up_Glycan_genes.tsv",sep="\t")
+meta$BT549_glyco <- colMeans(expr[intersect(bt549_glycan$x,rownames(expr)),]) # 24 BT549 TGFb-induced glycosylation-related genes
+# 98 glycosylation genes upregulated in human breast Mes vs. Epi
+human_breast_glyco <- read.table(file.path(dir2, "Question 1/Xu_Human_NMF_Harmony_Mes_Epi_Glycosylation_Genes.txt"),sep="\t",header=T)
+human_glyco_genes <- rownames(human_breast_glyco[human_breast_glyco$avg_log2FC > 0.5 & human_breast_glyco$p_val_adj<0.05,])
+meta$human_glyco = colMeans(expr[intersect(human_glyco_genes, rownames(expr)),])
+
+meta$site <- factor(meta$site, levels=c("Normal","Primary","Metastatic"))
+ggplot(meta, aes(x = site, y = human_glyco)) +
+  geom_jitter(aes(color = factor(site)), width=0.3,size = 1, alpha = 0.5) +
+  geom_boxplot(aes(fill = factor(site)), width = 0.8, alpha = 0)+
+  stat_compare_means(method="t.test",label="p.format",hide.ns = T,comparisons = list(c(1,2),c(1,3),c(2,3)))+
+  theme(panel.grid = element_blank(),
+        panel.background = element_blank(), axis.line = element_line(colour = "black"),
+        plot.title=element_text(hjust=0.5,size=13),
+        axis.text.x=element_text(angle=45, vjust=0.5,hjust=0.5,size=13),
+        legend.position="none",axis.title.x = element_blank())
+#write.table(meta,file.path(dir2,"Question 2/CCLE_meta_glycoscore_table.txt"),sep="\t", row.names = T)
+```
+
+4. Plot human and mouse glycosylation gene heatmaps 
+```{r}
+dir2 <- "~/Partners HealthCare Dropbox/Ning Guan/computational analysis"
+pb3_glyco = read.xlsx(file.path(dir2, "Question 1/Pb3_Pb2_Bulk_glycosylation_genes.xlsx"),sheet="ctrlpb3_vs_ctrlpb2_glyco",rowNames = T)
+human_breast_glyco <- read.table(file.path(dir2, "Question 1/Xu_Human_NMF_Harmony_Mes_Epi_Glycosylation_Genes.txt"),sep="\t",header=T,row.names = 1)
+pb3_labels <- c("Mgat3","Mgat4b","St8sia2","St8sia1","St8sia4","St3gal1","St3gal4","Xylt1","Gxylt2","Csgalnact1","B3galt4","B4galt6","B4galt5","B3galt1","Galnt3")
+pb3_indices <- which(rownames(pb3_glyco) %in% pb3_labels)
+  
+human_labels <- c("MGAT3","ST8SIA1","ST3GAL6","ST3GAL2","GXYLT2","XYLT1","A4GALT","B4GALT4","B4GALT6","GALNT16","GALNT6","GALNT5","GALNT7")
+human_indices <- which(rownames(human_breast_glyco) %in% human_labels)
+
+Heatmap(as.matrix(pb3_glyco[c("log2FoldChange")]), 
+        show_row_names = FALSE, # Hide default dense row labels
+        right_annotation = rowAnnotation(
+          link = anno_mark(at = pb3_indices, labels = rownames(pb3_glyco)[pb3_indices])
+        ))
+Heatmap(as.matrix(human_breast_glyco[c("avg_log2FC")]),
+        show_row_names = F,
+        right_annotation = rowAnnotation(link=anno_mark(at=human_indices,labels = rownames(human_breast_glyco)[human_indices])))
+```
+
