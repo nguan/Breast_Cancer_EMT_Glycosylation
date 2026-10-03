@@ -1,0 +1,165 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+rm(list=ls())
+#library(MAGeCKFlute)
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(ComplexHeatmap)
+library(UpSetR)
+library(EnhancedVolcano)
+library(openxlsx)
+```
+
+```{r}
+# Map count matrix barcodes with annotations
+dir <- "~/Dropbox (Partners HealthCare)/results"
+count_matrix <- read.table(file.path(dir,"mageck/Counts/counts-JD_GPP4212_2903301_Ning_plate1.txt"),header=T,sep="\t")
+annotations <- read.table(file.path(dir,"4.Chip files/CP1745_GRCm38_NCBI_CRISPRko_strict_gene_20221209.chip"),header=T,sep="\t")
+```
+
+```{r}
+annotations1 <- annotations[!duplicated(annotations$Barcode.Sequence),]
+counts <- merge(count_matrix, annotations1,by.x="Construct.Barcode",by.y="Barcode.Sequence")
+gene = annotations[duplicated(annotations$Barcode.Sequence),]
+counts$Construct.IDs <- counts$Gene.Symbol
+#counts <- counts[1:23]
+counts <- counts[c(1:2,8:22)]
+colnames(counts)[2] <- "Gene.Symbol"
+write.table(counts,file.path(dir,"mageck/Counts/CD8_NT_CTLA4_counts.txt"),row.names=F,sep="\t",quote=F)
+```
+```{r}
+# Next make design matrix and control list for Mageck_MLE
+no_site <- annotations[grep("NO_SITE",annotations$Gene.Symbol),]
+write.table(no_site$Barcode.Sequence,file.path(dir,"mageck/no_site.txt"),row.names=F,sep="\t",quote=F,col.names=F)
+```
+
+```{r}
+# Output
+gene_summary <- read.table("~/Documents/Spring_2023/Mageck_VISPR/results/test/VISPR_MLE.gene_summary.txt",sep="\t",header=T)
+gene_summary <- gene_summary[gene_summary$sgRNA>=3,]
+gene_summary <- gene_summary[order(gene_summary$CTLA4.z),]
+write.table(gene_summary, "~/Documents/Spring_2023/Mageck_VISPR/results/test/CD8_NT_CTLA4.gene_summary.txt",sep="\t",row.names = F)
+```
+3. Run MAGeCKFlute downstream analysis
+```{r}
+setwd("~/Dropbox (Partners HealthCare)/results/mageck/Mageck_Flute/")
+FluteMLE(gene_summary = "./Mageck_VISPR/results/test/VISPR_MLE.gene_summary.txt", treatname="CTLA4",ctrlname="NT", organism="mmu", outdir="Mageck_Flute",limit = c(3,50))
+```
+```{r}
+setwd("~/Dropbox (Partners HealthCare)/results/mageck/Mageck_Flute/")
+FluteRRA("~/Dropbox (Partners HealthCare)/results/mageck/Mageck_VISPR_RRA_CNV/results/test/rra_NT_CTLA4.gene_summary.txt", organism="mmu", outdir="rra_NT_CTLA4",limit = c(3,50))
+```
+
+```{r}
+# Remove essential genes
+setwd("~/Dropbox (Partners HealthCare)/results/mageck/Mageck_VISPR_RRA_CNV/results/test/")
+input <- read.table("rra_pDNA_Input.gene_summary.txt", sep="\t", header=T)
+essential_genes <- input[input$neg.fdr < 0.05, ]$id
+cd8_ctla44 <- read.table("rra_CD8_CTLA4.4.gene_summary.txt", sep="\t", header=T)
+cd8_nt <- read.table("rra_CD8_NT.gene_summary.txt", sep="\t", header=T)
+remove_essential <- function(gene_summary, genes, filename){
+  result <- read.table(gene_summary, sep="\t", header=T)
+  new_result <- result[!(result$id %in% genes),]
+  write.table(new_result, filename, sep="\t",row.names=F)
+}
+remove_essential("rra_CD8_NT.gene_summary.txt", essential_genes, "rra_CD8_NT_noneessential.gene_summary.txt")
+```
+```{r}
+# Compare removing vs. keeping outlier: CTLA4.4
+setwd("~/Dropbox (Partners HealthCare)/results/mageck/Mageck_VISPR_RRA_CNV/results/test/")
+
+cd8_ctla44 <- read.table("rra_CD8_CTLA4.4.gene_summary.txt", sep="\t", header=T)
+NT_ctla44 <- read.table("rra_NT_CTLA4.4.gene_summary.txt", sep="\t", header=T)
+cd8_ctla4 <- read.table("rra_CD8_CTLA4.gene_summary.txt", sep="\t", header=T)
+NT_ctla4 <- read.table("rra_NT_CTLA4.gene_summary.txt", sep="\t", header=T)
+cd8_nt <- read.table("rra_CD8_NT.gene_summary.txt", sep="\t", header=T)
+cd8_ctla44_genes <- cd8_ctla44[cd8_ctla44$neg.p.value<0.05,]$id
+NT_ctla44_genes <- NT_ctla44[NT_ctla44$neg.p.value<0.05,]$id
+cd8_ctla4_genes <- cd8_ctla4[cd8_ctla4$neg.p.value<0.05,]$id
+NT_ctla4_genes <- NT_ctla4[NT_ctla4$neg.p.value<0.05,]$id
+cd8_nt_genes <- cd8_nt[cd8_nt$neg.p.value<0.05,]$id
+# Upset plot
+lt <- list(CD8_CTLA4_neg=cd8_ctla44_genes,NT_CTLA4_neg=NT_ctla44_genes,CD8_NT_neg=cd8_nt_genes, Essential=essential_genes)
+m = make_comb_mat(lt)
+UpSet(m)
+```
+```{r}
+plot_invivo <- function(dat){
+  dat <- transform(dat, pvalue = pmin(pos.p.value, neg.p.value))
+  EnhancedVolcano(dat,lab=dat$id,x="pos.lfc", y="pvalue",pCutoff=0.01,labSize=4,title="CTLA4 vs. NT",pointSize=1,drawConnectors = T)
+}
+plot_invivo(NT_ctla44)
+```
+
+4. Make Gene Rank Plot 
+```{r}
+dir2 <- "~/Partners HealthCare Dropbox/Ning Guan/results/mageck/Mageck_VISPR_RRA_CNV/results/test"
+
+cd8_ctla4 <- read.table(file.path(dir2,"rra_CD8_CTLA4.4.gene_summary.txt"), sep="\t", header=T)
+nt_ctla4 <- read.table(file.path(dir2,"rra_NT_CTLA4.4.gene_summary.txt"), sep="\t", header=T)
+cd8_nt <- read.table(file.path(dir2,"rra_CD8_NT.gene_summary.txt"), sep="\t", header=T)
+```
+
+```{r}
+# Make gene rank plot. Input: original CRISPR result gene summary. Output: slightly modified dataframe with 
+edit_crispr <- function(crispr, title){
+  colnames(crispr) <- gsub("\\|",".",colnames(crispr))
+  crispr <- crispr[!is.na(crispr$id),] # Remove row with NA
+  crispr <- crispr[!duplicated(crispr$id),]
+  rownames(crispr) <- NULL
+  crispr <- column_to_rownames(crispr, 'id')
+  
+  # Combine positive and negative scores, log normalize
+  crispr$score <- 'NA'
+  crispr$score[crispr$neg.lfc<0] <- log10(crispr[crispr$neg.lfc<0, 'neg.score'])
+  crispr$score[crispr$neg.lfc>0] <- (-log10(crispr[crispr$neg.lfc>0, 'pos.score']))
+  crispr$score <- as.numeric(crispr$score)
+  crispr <- crispr[order(crispr$score),] # Order the genes by score
+  crispr$rank <- seq(1,dim(crispr)[1]) # Assign gene rank based on scores
+  
+  # Make new column for labeling genes. Label top 10 genes
+  crispr <- crispr %>% mutate(genelabels = "") # genelabels: column of gene names for genes to label
+  crispr$genelabels[1:10] <- rownames(crispr)[1:10]
+  crispr$genelabels[(nrow(crispr)-9): nrow(crispr)] <- rownames(crispr)[(nrow(crispr)-9): nrow(crispr)]
+  #crispr <- crispr %>% mutate(thres = neg.fdr <0.05 | pos.fdr <0.05)
+  crispr$thres <- 'no' # Thres: defines genes as neg, pos, neg.ctl or pos.ctl. Cutoff: p-value<0.05
+  crispr[crispr$neg.fdr<0.05 & crispr$neg.lfc<0,'thres'] <- 'neg'
+  crispr[crispr$pos.fdr<0.05 & crispr$neg.lfc>0,'thres'] <- 'pos'
+  
+  # Plot norm_z-score vs. gene rank
+  print(ggplot(crispr,aes(x=rank, y=score,color = thres)) + geom_point() +
+    geom_point(data=crispr[crispr$thres %in% c('neg.ctl','pos.ctl'),])+
+    #geom_text_repel(aes(label=genelabels), max.overlaps=Inf, segment.color = NA,size=4) +
+    scale_color_manual(limits = c('no', 'pos', 'neg'), 
+                       values=c('darkgrey', 'orange','skyblue'), name = NULL,
+                       labels=c('Not significant', 'Sensitizer Genes','Resistance Genes'))+
+    theme_classic() + xlab('Rank') + ylab('normZ Score') + geom_hline(yintercept=0)+ggtitle(title)+
+    theme(axis.text=element_text(size=13), axis.title=element_text(size=14,face="bold"),
+          axis.text.x=element_text(angle=90, vjust=0.5,hjust=0.5),
+          legend.text = element_text(size=12),legend.position = "none",plot.title=element_text(size=14,face="bold", hjust=0.5)))
+  return(crispr)
+}
+cd8_ctla4_new <- edit_crispr(cd8_ctla4, "CTLA4 vs. CD8-Depleted")
+nt_ctla4_new <- edit_crispr(nt_ctla4, "CTLA4 vs. NT")
+nt_cd8_new <- edit_crispr(cd8_nt, "NT vs. aCD8")
+# Primary screen
+pb3_primary <- read_excel(file.path(dir,"Primary screen/TNSC_Breast_OT-I.OVA_Coculture-T_r1+2+3.gene_summary.xlsx"))
+pb3_primary_new <- edit_crispr(pb3_primary, "PB3_Primary")
+# Minipool screen
+pb2_mini <- read_excel(file.path(dir,"minipool-in vitro/1. T cell killing.xlsx"),sheet="PB-2 ET 1-7 vs no OVA")
+pb3_mini <- read_excel(file.path(dir,"minipool-in vitro/1. T cell killing.xlsx"),sheet="PB-3 ET 1-4 vs no OVA")
+l2_mini <- read_excel(file.path(dir,"minipool-in vitro/1. T cell killing.xlsx"),sheet="L2 ET 3-1 vs no GFP")
+h8_mini <- read_excel(file.path(dir,"minipool-in vitro/1. T cell killing.xlsx"),sheet="H8 ET 3-1 vs no GFP")
+crispr <- pb2_mini
+pb2_mini_new <- edit_crispr(pb2_mini, "pB-2")
+pb3_mini_new <- edit_crispr(pb3_mini, "pB-3")
+h8_mini_new <- edit_crispr(h8_mini, "4T1-Epi")
+l2_mini_new <- edit_crispr(l2_mini, "4T1-Mes")
+```
+
