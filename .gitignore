@@ -1,0 +1,9 @@
+*_cache/
+*_files/
+*.nb.html
+*.html
+Data/Xu_etal_2024_scRNAseq/
+
+Data/CCLE_RNAseq_rsem_genes_tpm_20180929.txt.gz
+Data/GSE96058*
+Data/GSE209998*
