@@ -31,9 +31,9 @@ library("RTCGA.mRNA")
 
 Survival analysis from excel sheet copied directly from Human Protein Atlas
 ```{r}
-# Tmem165
-tmem <- read_excel("~/Partners HealthCare Dropbox/Ning Guan/Lab Work- Alexa Mitchell/Spring_2025/TCGA BRCA Analysis/Breast TMEM165 Survival.xlsx")
-slc <- read_excel("~/Partners HealthCare Dropbox/Ning Guan/Lab Work- Alexa Mitchell/Spring_2025/TCGA BRCA Analysis/Breast SLC35A2 Survival.xlsx")
+# TMEM165 and SLC35A2 survival data downloaded from Human Protein Atlas, for breast cancer (TCGA BRCA)
+tmem <- read_excel("./Data/Breast TMEM165 Survival.xlsx")
+slc <- read_excel("./Data/Breast SLC35A2 Survival.xlsx")
 
 #description<-data.frame(do.call('rbind', strsplit(as.character(tmem$Description), ', ', fixed=TRUE)))
 data_split <- slc %>%

@@ -47,7 +47,7 @@ de_genes <- function(data, genes){
 ctrl_glyco <- de_genes(ctrl_res, glycosylation_genes)
 # Make an excel sheet with these genes pb3_vs_pb2
 genesets <- list("ctrlpb3_vs_ctrlpb2_glyco"=ctrl_glyco)
-write.xlsx(genesets,file.path(outdir,"Pb3_Pb2_Bulk_glycosylation_genes.xlsx"),rowNames=T)
+write.xlsx(genesets,file.path("./Data/Pb3_Pb2_Bulk_glycosylation_genes.xlsx"),rowNames=T)
 ```
 
 1b. Human TNBC scRNA-seq analysis 
@@ -203,31 +203,42 @@ tumor.bc@meta.data %>%
 mes.markers <- FindMarkers(tumor.bc, ident.1=c(1,6,7),logfc.threshold=0.5)
 # Which of them are glysoylation related? 
 glycosylation_genes_human = as.vector(unique(glycosylation_table$db_gene_symbol))
-gly.mes <- mes.markers[rownames(mes.markers) %in% glycosylation_genes_human,]
-write.table(gly.mes,file=file.path(dir,"Xu_Human_NMF_Harmony_Mes_Epi_Glycosylation_Genes.txt"),sep="\t",row.names=T)
-table(tumor.bc[[c("Clinical_Subtype","NMF_cluster")]])
+human_breast_glyco <- mes.markers[rownames(mes.markers) %in% glycosylation_genes_human,]
+human_breast_glyco <- human_breast_glyco[abs(human_breast_glyco$avg_log2FC) >1 & human_breast_glyco$p_val_adj<0.05,]
+write.table(human_breast_glyco,file="./Data/Xu_Human_NMF_Harmony_Mes_Epi_Glycosylation_Genes.txt",sep="\t",row.names=T)
 ```
 ```{r}
 VlnPlot(tumor.bc, features=c("Epi.Score","Mes.Score"),pt.size=0.1)
 ```
 
-```{r}
-# Get overlap with pb3 vs. pb2 data
-ctrl_glyco <- read.xlsx(file.path(dir,"Pb3_Pb2_Bulk_glycosylation_genes.xlsx"),sheet = "ctrlpb3_vs_ctrlpb2_glyco",rowNames=T)
-post_glyco <- read.xlsx(file.path(dir,"Pb3_Pb2_Bulk_glycosylation_genes.xlsx"),sheet = "postpb3_vs_postpb2_glyco",rowNames=T)
-gly.mes <- gly.mes[gly.mes$p_val_adj<0.05,]
-gly.mes.up <- gly.mes[gly.mes$avg_log2FC > 0,]
-colnames(gly.mes.up) <- paste(colnames(gly.mes.up),".human",sep="")
-ctrl_glyco_humanTNBC <- ctrl_glyco[ctrl_glyco$Human_symbol %in% rownames(gly.mes.up),] # 7 genes
-post_glyco_humanTNBC <- post_glyco[post_glyco$Human_symbol %in% rownames(gly.mes.up),]
-ctrl_glyco_humanTNBC <- merge(ctrl_glyco_humanTNBC,gly.mes.up, by.x="Human_symbol",by.y=0,all=F)
-post_glyco_humanTNBC <- merge(post_glyco_humanTNBC,gly.mes.up, by.x="Human_symbol",by.y=0,all=F)
-ctrl_glyco_humanTNBC <- ctrl_glyco_humanTNBC[order(ctrl_glyco_humanTNBC$log2FoldChange,decreasing=T),]
-post_glyco_humanTNBC <- post_glyco_humanTNBC[order(post_glyco_humanTNBC$log2FoldChange,decreasing=T),]
-human_mouse <- list("Pb3_Pb2_vs_Human_Mes"=ctrl_glyco_humanTNBC,"postpb3_pb2_vs_Human_Mes"=post_glyco_humanTNBC)
-write.xlsx(human_mouse,file.path(dir,"Pb3_Pb2_vs_Xu_Human_NMF_Harmony_Mes_vs_Epi_Glyco_genes.xlsx"))
-```
 
+4. Plot human and mouse glycosylation gene heatmaps 
+```{r}
+pb3_glyco = read.xlsx("./Data/Pb3_Pb2_Bulk_glycosylation_genes.xlsx",sheet="ctrlpb3_vs_ctrlpb2_glyco",rowNames = T)
+human_breast_glyco <- read.table("./Data/Glycoyslation Gene Human Breast scRNA-seq.txt",sep="\t",header=T,row.names = 1)
+pb3_labels <- c("Mgat3","Mgat4b","St8sia2","St8sia1","St8sia4","St3gal1","St3gal4","Xylt1","Gxylt2","Csgalnact1","B3galt4","B4galt6","B4galt5","B3galt1","Galnt3")
+pb3_indices <- which(rownames(pb3_glyco) %in% pb3_labels)
+  
+human_labels <- c("MGAT3","MGAT5","ST8SIA1","ST3GAL6","ST3GAL2","GXYLT2","XYLT1","A4GALT","B4GALT4","B4GALT6","GALNT16","GALNT6","GALNT5","GALNT7")
+human_indices <- which(rownames(human_breast_glyco) %in% human_labels)
+
+Heatmap(as.matrix(pb3_glyco[c("log2FoldChange")]), 
+        show_row_names = FALSE, # Hide default dense row labels
+        right_annotation = rowAnnotation(
+          link = anno_mark(at = pb3_indices, labels = rownames(pb3_glyco)[pb3_indices])
+        ))
+
+my_limits <- c(-5, 0, 5)
+
+# Map limits directly to colors (values outside -3 and 3 will saturate)
+col_fun <- colorRamp2(my_limits, c("blue", "white","red"))
+Heatmap(as.matrix(human_breast_glyco[c("avg_log2FC")]),
+        show_row_names = F,
+        right_annotation = rowAnnotation(link=anno_mark(at=human_indices,labels = rownames(human_breast_glyco)[human_indices])),
+        col = col_fun,
+        heatmap_legend_param = list(
+          at = seq(-5, 5, by = 5)))
+```
 
 2. CCLE data analysis
 ```{r}
